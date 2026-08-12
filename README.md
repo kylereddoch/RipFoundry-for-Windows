@@ -2,7 +2,7 @@
 
 ![RipFoundry for Windows Rip DVD interface](docs/images/ripfoundry-windows.png)
 
-A Windows-native GUI port of the Ubuntu **Rip DVD to Jellyfin** and **Add 1080p Jellyfin Version** workflows.
+RipFoundry for Windows is the Windows-native GUI companion to [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux), bringing local DVD ripping, optional enhanced and 1080p versions, validation, and safe Jellyfin library transfers into a guided Windows interface.
 
 ## What moved to Windows
 
