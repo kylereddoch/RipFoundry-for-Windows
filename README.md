@@ -1,5 +1,7 @@
 # RipFoundry for Windows
 
+![RipFoundry for Windows Rip DVD interface](docs/images/ripfoundry-windows.png)
+
 A Windows-native GUI port of the Ubuntu **Rip DVD to Jellyfin** and **Add 1080p Jellyfin Version** workflows.
 
 ## What moved to Windows
