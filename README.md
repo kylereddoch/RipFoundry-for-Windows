@@ -1,208 +1,199 @@
 # RipFoundry for Windows
 
-![RipFoundry for Windows Rip DVD interface](docs/images/ripfoundry-windows.png)
+![RipFoundry for Windows existing-video analysis and live encoding progress](docs/images/ripfoundry-windows.png)
 
-RipFoundry for Windows is the Windows-native GUI companion to [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux), bringing local DVD ripping, optional enhanced and 1080p versions, validation, and safe Jellyfin library transfers into a guided Windows interface.
+RipFoundry for Windows is the Windows-native GUI companion to [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux), the original project this version grew from. It rips DVDs and creates Jellyfin-ready movie versions while keeping the ripping, encoding, validation, and staging work on the Windows PC. Only completed and verified files are finalized in the configured media library.
 
-## What moved to Windows
+Version 1.2.0 adds guided processing for existing MKV, MP4, and M4V files, live progress reporting, a scrollable Activity log, single-job protection, and safe job cancellation.
 
-The expensive work now runs on the Windows PC:
+## Download and run
 
-1. MakeMKV rips the DVD to **local Windows staging**.
-2. Optional HandBrake Enhanced DVD or FFmpeg 1080p encoding also runs locally.
-3. FFprobe validates the output.
-4. Only completed files are copied to the user-configured media library destination.
-5. A SHA-256 checksum is calculated on both the local file and temporary NAS copy.
-6. The destination file is only finalized after the checksums match.
+RipFoundry is distributed as a portable Windows application.
 
-This means the Ubuntu Jellyfin server is no longer doing DVD ripping or video encoding.
+1. Download the latest `RipFoundry-Windows-*-portable.zip` from [Releases](https://github.com/kylereddoch/RipFoundry-for-Windows/releases).
+2. Extract the entire ZIP to a permanent folder.
+3. Keep `RipFoundry.exe` and the `_internal` folder together.
+4. Double-click **RipFoundry.exe**.
+5. Open **Settings**, confirm the required tools, and choose the media library and local staging folders.
 
-## Preserved features
+The portable EXE includes the Python runtime and opens without a console window. Users do not need to install Python or run the source-code batch launcher.
 
-- MakeMKV DVD title scan
-- Single-title and multi-title selection
-- Disc-label title suggestion
-- TMDb assisted metadata matching
-- Manual TMDb metadata fallback
-- Jellyfin folder naming with `[tmdbid-ID]`
-- Original MakeMKV remux retained
-- Optional **Enhanced DVD** H.264 version
-- Optional **1080p** H.264 version
-- Correct Jellyfin multi-version naming (` - 480p`, ` - 480p Enhanced`, ` - 1080p`)
-- Aspect-ratio-preserving 1080-height scaling
-- Selective deinterlacing
-- Audio, subtitles, metadata, and chapters carried forward where the encoder supports them
-- FFprobe duration/resolution/codec validation
-- Local staging retained when a job fails
-- SHA-256 verified transfer to the configured media destination
-- Existing-library **Add 1080p Version** workflow
+To create a desktop shortcut, keep `Install-Shortcut.ps1` beside `RipFoundry.exe`, right-click the script, and choose **Run with PowerShell**. The shortcut launches the EXE directly.
 
-## Requirements on the Windows PC
+Windows may show a first-run reputation warning for an unsigned community application. Confirm that the ZIP came from the official RipFoundry repository before running it.
 
-Install:
+## Windows requirements
 
-- Python 3.10+
-- [MakeMKV](https://www.makemkv.com/download/) — installs the `makemkvcon64.exe` console tool used to scan and rip DVDs
-- [FFmpeg + FFprobe](https://ffmpeg.org/download.html#build-windows) — use one of the Windows builds linked by FFmpeg.org; FFmpeg creates 1080p versions and FFprobe validates completed files
-- [HandBrakeCLI](https://handbrake.fr/downloads2.php) — only required when using **Original DVD + Enhanced DVD**
+- 64-bit Windows 10 or Windows 11
+- [MakeMKV](https://www.makemkv.com/download/) for scanning and ripping DVDs
+- [FFmpeg and FFprobe](https://ffmpeg.org/download.html#build-windows) for 1080p creation, media inspection, and validation
+- [HandBrakeCLI](https://handbrake.fr/downloads2.php) when creating an Enhanced output
+- Enough local free space for staging the source and selected outputs
 
-The program automatically checks `PATH` and common Windows installation locations. Open **Settings** to see a green **Ready** or a clear **Not found** indicator for every tool. Each row also has:
+RipFoundry checks `PATH` and common Windows installation locations. The **Settings** tab reports **Ready** or **Not found** for each tool and provides controls to locate the executable manually.
 
-- **Locate...** to select an executable manually
-- **Get** to open the official download page
-- Helper text and a tooltip explaining what the tool does
+For MakeMKV, select `makemkvcon64.exe` or `makemkvcon.exe`, not the regular `MakeMKV.exe` desktop interface. FFmpeg and FFprobe normally live together in the same extracted `bin` folder.
 
-For MakeMKV, select `makemkvcon64.exe` (or `makemkvcon.exe`), not the regular `MakeMKV.exe` desktop interface. FFmpeg and FFprobe usually live together in the same extracted `bin` folder.
+## What RipFoundry does
 
-## First launch
+- Scans MakeMKV DVD titles and supports single-title or multi-title selection.
+- Uses TMDb-assisted metadata with a manual fallback.
+- Creates Jellyfin folders using `Movie Name (Year) [tmdbid-ID]` naming.
+- Retains the untouched MakeMKV remux when ripping a DVD.
+- Optionally creates a playback-friendly H.264 Enhanced version at the source resolution.
+- Optionally creates a separate H.264 1080p version with aspect-ratio-preserving scaling.
+- Preserves audio, subtitles, metadata, and chapters where the selected encoder supports them.
+- Validates codec, resolution, duration, audio tracks, and subtitle tracks with FFprobe.
+- Copies completed files through a temporary `.partial` destination.
+- Verifies SHA-256 checksums before finalizing a media-library file.
+- Processes existing MKV, MP4, and M4V sources without changing the original.
 
-Run:
+## First-time setup
+
+Open **Settings** after launching `RipFoundry.exe`.
+
+### Media Library Destination
+
+Choose the folder where completed movies should be finalized. Supported examples include:
 
 ```text
-Launch-RipFoundry.bat
+\\server\share\Movies
+M:\Movies
+D:\Media\Movies
 ```
 
-Or right-click `Install-Shortcut.ps1` and choose **Run with PowerShell** to create a desktop shortcut.
-The shortcut uses the included RipFoundry icon.
+Click **Test Destination** to confirm that Windows can reach the folder and create a temporary file. A UNC path is generally more reliable than a mapped drive because it does not depend on a drive-letter mapping.
 
-### Storage settings
+### Local staging
 
-On first launch, open **Settings** and choose **Media Library Destination**. This can be:
-
-```text
-\\server\share\Movies     # UNC path
-M:\Movies                  # mapped network drive
-D:\Media\Movies           # local folder
-```
-
-Use **Browse...** to select a folder or type/paste a UNC path directly. Click **Test Destination** to verify that Windows can reach the folder and create files there. The selection is saved in `%APPDATA%\RipFoundry\config.json`.
-
-### DVD drive selector
-
-RipFoundry now lists detected Windows DVD/CD drives by drive letter. A choice such as:
-
-```text
-D: - DVD/CD drive - MakeMKV disc:0
-```
-
-means that the familiar Windows `D:` drive is passed to MakeMKV as its first optical-drive source, `disc:0`. A second optical drive is shown as `disc:1`. Click **Refresh Drives** after connecting a USB DVD drive.
-
-If Windows does not report an optical drive, the selector explains that RipFoundry will keep MakeMKV's `disc:0` default. Advanced users can still type a `disc:N` source directly.
-
-Local staging still defaults to:
+Rips and encodes are created locally before they are validated and copied. The default is:
 
 ```text
 %USERPROFILE%\Videos\RipFoundry Staging
 ```
 
-A mapped drive letter is not required. For a NAS, a UNC path is generally preferable because it does not depend on a drive-letter mapping.
+Choose a drive with enough free space for the source plus every output selected for the job.
 
-## TMDb setup
+### DVD drive
 
-In **Settings**, paste your TMDb **API Read Access Token**. It is stored in:
+RipFoundry lists detected Windows DVD/CD drives by drive letter and maps them to MakeMKV sources. For example:
+
+```text
+D: - DVD/CD drive - MakeMKV disc:0
+```
+
+Click **Refresh Drives** after connecting a USB optical drive. Advanced users can enter a `disc:N` source directly.
+
+### TMDb
+
+Paste a TMDb **API Read Access Token** into Settings. RipFoundry stores its configuration in:
 
 ```text
 %APPDATA%\RipFoundry\config.json
 ```
 
-The movie naming format is:
+## Rip a DVD
 
-```text
-Movie Name (Year) [tmdbid-123]\
-    Movie Name (Year) [tmdbid-123] - 480p.mkv
-    Movie Name (Year) [tmdbid-123] - 1080p.mkv
-```
+1. Insert the DVD and click **Scan DVD**.
+2. Select the main title. Ctrl-click supports discs containing multiple titles.
+3. Choose one processing mode:
+   - **Original DVD + Enhanced DVD** keeps the untouched remux and creates a native-resolution H.264 copy with HandBrakeCLI.
+   - **Original DVD + 1080p** keeps the untouched remux and creates a separate 1080p H.264 copy with FFmpeg.
+   - **Original DVD only** keeps only the untouched MakeMKV remux.
+4. Click **Rip Selected Title(s)**.
+5. Match each selected title to TMDb and confirm the plan.
 
-or:
+Completed files use Jellyfin multi-version naming such as:
 
 ```text
 Movie Name (Year) [tmdbid-123]\
     Movie Name (Year) [tmdbid-123] - 480p.mkv
     Movie Name (Year) [tmdbid-123] - 480p Enhanced.mkv
+    Movie Name (Year) [tmdbid-123] - 1080p.mkv
 ```
 
-## Encoding settings in plain language
+## Process an existing video
 
-- **CRF** controls x264 quality. The default `18` produces high quality and larger files. Higher values reduce file size and quality.
-- **1080p x264 preset** controls encoding speed versus compression efficiency. `slow` is the recommended balance.
-- **Local staging** is temporary working space on the Windows PC. RipFoundry rips and encodes there first, then copies only validated output to the configured media destination.
+Analysis and processing are deliberately separate decisions.
 
-## Rip DVD tab
+1. Open **Process Existing Video**.
+2. Search the configured library or click **Choose Video...**.
+3. Select an MKV, MP4, or M4V file.
+4. Click **Analyze Selected Video**. Analysis reads media details but does not encode, copy, rename, or otherwise change the source.
+5. Review the source details and RipFoundry's recommendation. The analysis panel has its own scrollbar when the complete reason is longer than the visible area.
+6. Choose Enhanced, 1080p, both outputs, or stop without processing.
+7. Click **Process Video**, review the exact filenames, and confirm the job.
 
-1. Insert the DVD.
-2. Click **Scan DVD**.
-3. Select the main movie title. Ctrl-click supports collection discs with multiple titles.
-4. Choose the processing mode:
-   - **Original DVD + Enhanced DVD** keeps the untouched MakeMKV original and creates a second H.264 copy at the DVD's native resolution. HandBrakeCLI deinterlaces when needed and produces a more playback-friendly version.
-   - **Original DVD + 1080p** keeps the untouched original and creates a second H.264 copy scaled to 1080p with FFmpeg. This may improve playback compatibility but cannot restore HD detail that was not on the DVD.
-   - **Original DVD only** keeps only the untouched MakeMKV remux at the DVD's native resolution. It is the fastest option and requires no extra encoding space.
-5. Click **Rip Selected Title(s)**.
-6. Match each selected DVD title to TMDb.
-7. Confirm the plan.
+The analyzer considers the container, video codec, resolution, display aspect ratio, field order, audio tracks, and subtitle tracks. Its conservative recommendations are:
 
-The rip/encode happens locally. Completed media is then transferred and checksum-verified at the configured Media Library Destination.
+- Interlaced or non-H.264 SD: Enhanced + 1080p
+- Progressive H.264 SD or 720p: 1080p
+- Progressive H.264 near 1080p: no additional encode
+- Interlaced or non-H.264 near 1080p: Enhanced native-resolution
+- Above 1080p: a separate 1080p compatibility version
 
-## Add 1080p Version tab
+When both outputs are selected, each output is encoded directly from the unchanged original. RipFoundry never creates the 1080p version from the Enhanced version.
 
-1. Search for the movie in the configured media library.
-2. Select the native/original MKV.
-3. Click **Add 1080p Version**.
+MP4 and M4V text subtitles are converted to SubRip for MKV compatibility. Unsupported subtitle conversion fails safely instead of silently dropping the track.
 
-The app reads the source from the configured library, performs the encode on the Windows PC's local staging directory, validates it, then copies the finished 1080p version back to the movie folder with checksum verification.
+## Activity, progress, and cancellation
 
-The original file is preserved. If an older library item uses:
+The **Activity** area remains visible at the normal window size and reports:
 
-```text
-Movie Name (Year) [tmdbid-123].mkv
-```
+- The current processing phase
+- Live FFmpeg or HandBrake percentage
+- Copy progress
+- SHA-256 verification progress
+- Encoder and validation messages in a vertically scrollable log
 
-it is renamed after a successful encode to its native resolution form, for example:
+RipFoundry permits one background job at a time. Analysis, mode selection, and processing controls are disabled while a job is active, preventing the same source from being submitted twice.
 
-```text
-Movie Name (Year) [tmdbid-123] - 480p.mkv
-```
+Click **Cancel Active Job** to stop the current encoder or copy operation. RipFoundry asks for confirmation, stops the active process, prevents FFmpeg from starting a fallback retry, removes that job's partial staging and destination files, and leaves the original source unchanged.
 
-## Build a normal Windows EXE
+## Encoding settings
 
-After testing the Python version, run:
+- **CRF** controls H.264 quality. The default `18` produces high quality and larger files; higher values reduce size and quality.
+- **1080p x264 preset** controls speed versus compression efficiency. `slow` is the recommended balance.
+- **Local staging** controls where temporary working files are created.
+
+A DVD-to-1080p encode is conventional scaling. It can improve compatibility but cannot recover HD detail that was not present on the DVD. The untouched MakeMKV remux remains the archival version.
+
+## Safety behavior
+
+RipFoundry does not place unfinished encoder output directly in the media library. It validates local output first, copies to a `.partial` filename, compares SHA-256 checksums, and only then assigns the final filename.
+
+- A normal processing failure retains local staging files for troubleshooting.
+- An intentional cancellation removes the cancelled job's partial staging and destination files.
+- Existing completed outputs are never overwritten.
+- The original MKV, MP4, or M4V remains unchanged.
+
+## Build the EXE from source
+
+This section is for contributors and users who want to build RipFoundry themselves. Building requires Python 3.10 or newer.
+
+From the repository folder, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Build-EXE.ps1
 ```
 
-That uses PyInstaller to produce:
+The script installs or updates PyInstaller and creates:
 
 ```text
 dist\RipFoundry\RipFoundry.exe
 ```
 
-You can then launch RipFoundry without a console window.
-The build script embeds the RipFoundry logo in the EXE and bundles the artwork used by the app's title bar, taskbar, and About tab.
+Run the built executable from inside `dist\RipFoundry`; keep its `_internal` folder beside it. `Launch-RipFoundry.bat` remains available only as a source-development launcher.
 
-## Roadmap
+## Changelog and roadmap
 
-### Windows installer (possible next release)
+See [CHANGELOG.md](CHANGELOG.md) for release details.
 
-A traditional Windows installer is planned as a possible next-version improvement. The goal is to provide a familiar `RipFoundry-Setup.exe` experience that:
+A traditional signed Windows installer remains a possible future improvement. The current 1.2.0 release is portable: extract the complete folder and run `RipFoundry.exe`.
 
-- Installs the compiled application into a standard Windows application folder
-- Adds the RipFoundry icon to the Start menu and Windows Search
-- Offers an optional desktop shortcut
-- Adds RipFoundry to **Installed apps** with a normal uninstaller
-- Preserves user settings during upgrades
-- Does not require users to install Python or keep the extracted project folder in a particular location
+## Project origins
 
-The current 1.1.0 package remains a portable project package: keep the extracted folder in a permanent location, or use `Build-EXE.ps1` to build the Windows executable locally.
-
-## Safety behavior
-
-RipFoundry deliberately does not copy unfinished encoder output straight into the Jellyfin library. New files remain in local staging until validation succeeds. Transfers use a `.partial` filename and SHA-256 verification before the final filename is created.
-
-If a rip or encode fails, the staging files are left in place for troubleshooting.
-
-## Note about DVD upscaling
-
-A DVD-to-1080p encode is conventional scaling. It does not recover HD detail that was never present on the DVD. The untouched MakeMKV remux remains the archival version.
+RipFoundry for Windows grew from [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux). The Windows edition keeps the original project's Jellyfin-focused ripping, naming, validation, and verified-transfer ideas while providing a native Windows interface and Windows-local encoding workflow.
 
 ## Project attribution
 
@@ -212,4 +203,4 @@ Website: **https://www.kylereddoch.me**
 
 Repository: **https://github.com/kylereddoch/RipFoundry-for-Windows**
 
-The Windows app includes this attribution and the RipFoundry mark in its **About** tab. The `RipFoundry for Windows 1.1.0` line opens the GitHub repository in the default browser.
+The application's **About** tab includes this attribution, the RipFoundry mark, the current version, and a link to the repository.

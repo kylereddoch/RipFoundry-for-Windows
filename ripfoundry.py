@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_NAME = "RipFoundry for Windows"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 REPOSITORY_URL = "https://github.com/kylereddoch/RipFoundry-for-Windows"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "RipFoundry"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -33,6 +33,16 @@ INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 MODE_ORIGINAL = "Original DVD only"
 MODE_ENHANCED = "Original DVD + Enhanced DVD"
 MODE_UPSCALE = "Original DVD + 1080p"
+
+PROCESS_ENHANCED = "Enhanced native-resolution only"
+PROCESS_UPSCALE = "1080p only"
+PROCESS_BOTH = "Enhanced + 1080p"
+PROCESS_NONE = "No additional encode"
+SUPPORTED_VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v"}
+
+
+class JobCancelled(RuntimeError):
+    """Raised when the user cancels the active RipFoundry job."""
 
 MODE_DESCRIPTIONS = {
     MODE_ENHANCED: (
@@ -107,6 +117,8 @@ class MediaInfo:
     dar: str
     audio_tracks: int
     subtitle_tracks: int
+    field_order: str = "unknown"
+    container: str = "unknown"
 
 
 def parse_duration(value: str) -> int:
@@ -148,6 +160,125 @@ def resolution_label(info: MediaInfo) -> str:
     return f"{info.height}p"
 
 
+def is_supported_video(path: Path) -> bool:
+    return path.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES
+
+
+def existing_video_base(source: Path) -> str:
+    folder_name = source.parent.name
+    if folder_name and source.name.lower().startswith(folder_name.lower()):
+        return folder_name
+    stem = re.sub(r"\s+-\s+\d+p(?:\s+Enhanced)?$", "", source.stem, flags=re.I)
+    return sanitize_title(stem)
+
+
+def is_interlaced(info: MediaInfo) -> bool:
+    return info.field_order.lower() in {"tt", "bb", "tb", "bt"}
+
+
+def recommend_existing_processing(info: MediaInfo) -> tuple[str, str]:
+    codec = info.codec.lower()
+    if info.height <= 600:
+        if is_interlaced(info) or codec != "h264":
+            return (
+                PROCESS_BOTH,
+                "The source is SD and either interlaced or not H.264. Keep a cleaned native-resolution "
+                "version and create a separate 1080p compatibility version.",
+            )
+        return (
+            PROCESS_UPSCALE,
+            "The source is progressive H.264 at SD resolution, so a separate native-resolution re-encode "
+            "would add compression without a clear benefit.",
+        )
+    if info.height < 1000:
+        return (
+            PROCESS_UPSCALE,
+            "The source is below 1080p and does not need a separate native-resolution cleanup encode.",
+        )
+    if info.height <= 1100:
+        if is_interlaced(info):
+            return (
+                PROCESS_ENHANCED,
+                "The source is already near 1080p but is flagged as interlaced. A native-resolution cleanup "
+                "encode is the useful output.",
+            )
+        if codec != "h264":
+            return (
+                PROCESS_ENHANCED,
+                f"The source is already near 1080p but uses {codec or 'an unknown codec'} video. A native-resolution "
+                "H.264 version is the useful output.",
+            )
+        return (
+            PROCESS_NONE,
+            "The source is already progressive H.264 at approximately 1080p, so another encode would add "
+            "compression without a clear playback benefit.",
+        )
+    return (
+        PROCESS_UPSCALE,
+        "The source is above 1080p. A separate 1080p version can reduce playback and bandwidth requirements "
+        "while preserving the original.",
+    )
+
+
+def analysis_summary(source: Path, info: MediaInfo, recommendation: str, reason: str) -> str:
+    return (
+        f"File: {source.name}\n"
+        f"Container: {info.container}\n"
+        f"Video: {info.codec or 'unknown'}, {info.width}x{info.height} ({resolution_label(info)})\n"
+        f"Display aspect ratio: {info.dar or 'unknown'}\n"
+        f"Field order: {info.field_order or 'unknown'}\n"
+        f"Audio tracks: {info.audio_tracks}\n"
+        f"Subtitle tracks: {info.subtitle_tracks}\n\n"
+        f"Recommendation: {recommendation}\n"
+        f"Reason: {reason}"
+    )
+
+
+def parse_ffmpeg_progress(line: str, duration: float) -> float | None:
+    """Convert FFmpeg -progress output to a source-duration percentage."""
+    value = line.strip()
+    if value == "progress=end":
+        return 100.0
+    microseconds = None
+    for key in ("out_time_us=", "out_time_ms="):
+        if value.startswith(key):
+            try:
+                microseconds = int(value[len(key):])
+            except ValueError:
+                return None
+            break
+    if microseconds is not None:
+        if duration <= 0:
+            return None
+        return max(0.0, min(100.0, microseconds / 1_000_000 / duration * 100))
+    if value.startswith("out_time="):
+        try:
+            hours, minutes, seconds = value[len("out_time="):].split(":")
+            elapsed = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        except (TypeError, ValueError):
+            return None
+        if duration <= 0:
+            return None
+        return max(0.0, min(100.0, elapsed / duration * 100))
+    return None
+
+
+def is_ffmpeg_progress_line(line: str) -> bool:
+    key = line.strip().partition("=")[0]
+    return key in {
+        "bitrate", "drop_frames", "dup_frames", "encoder", "fps", "frame",
+        "out_time", "out_time_ms", "out_time_us", "progress", "speed",
+        "stream_0_0_q", "total_size",
+    }
+
+
+def parse_handbrake_progress(line: str) -> float | None:
+    match = re.search(r"Encoding:.*?([0-9]+(?:\.[0-9]+)?)\s*%", line, flags=re.I)
+    if not match:
+        return None
+    return max(0.0, min(100.0, float(match.group(1))))
+
+
 def detect_optical_drives() -> list[tuple[str, str]]:
     """Return friendly Windows optical-drive labels and MakeMKV disc sources."""
     if os.name != "nt":
@@ -179,12 +310,14 @@ def detect_optical_drives() -> list[tuple[str, str]]:
         return []
 
 
-def sha256_file(path: Path, callback=None) -> str:
+def sha256_file(path: Path, callback=None, cancel_check=None) -> str:
     h = hashlib.sha256()
     total = path.stat().st_size
     done = 0
     with path.open("rb") as f:
         while True:
+            if cancel_check:
+                cancel_check()
             chunk = f.read(8 * 1024 * 1024)
             if not chunk:
                 break
@@ -195,32 +328,62 @@ def sha256_file(path: Path, callback=None) -> str:
     return h.hexdigest()
 
 
-def copy_verified(source: Path, destination: Path, log, progress=None) -> None:
+def copy_verified(source: Path, destination: Path, log, progress=None, phase=None, cancel_check=None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".partial")
     if partial.exists():
         partial.unlink()
+    if phase:
+        phase(f"Copying to library: {destination.name}")
+    if progress:
+        progress(0)
     log(f"Copying to media library: {destination}")
     total = source.stat().st_size
     done = 0
-    with source.open("rb") as src, partial.open("wb") as dst:
-        while True:
-            chunk = src.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            dst.write(chunk)
-            done += len(chunk)
-            if progress and total:
-                progress(done / total * 100)
-    log("Computing SHA-256 on local and destination copies...")
-    local_hash = sha256_file(source)
-    remote_hash = sha256_file(partial)
+    try:
+        with source.open("rb") as src, partial.open("wb") as dst:
+            while True:
+                if cancel_check:
+                    cancel_check()
+                chunk = src.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+                done += len(chunk)
+                if progress and total:
+                    progress(done / total * 100)
+        log("Computing SHA-256 on local and destination copies...")
+        if phase:
+            phase(f"Verifying checksums: {destination.name}")
+        if progress:
+            progress(0)
+        local_hash = sha256_file(
+            source,
+            (lambda done, total: progress(done / total * 50)) if progress else None,
+            cancel_check,
+        )
+        remote_hash = sha256_file(
+            partial,
+            (lambda done, total: progress(50 + done / total * 50)) if progress else None,
+            cancel_check,
+        )
+    except JobCancelled:
+        partial.unlink(missing_ok=True)
+        raise
     log(f"Local SHA-256: {local_hash}")
     log(f"Dest. SHA-256: {remote_hash}")
     if local_hash != remote_hash:
         partial.unlink(missing_ok=True)
         raise RuntimeError("Checksum mismatch. Local staging file was preserved.")
+    if cancel_check:
+        try:
+            cancel_check()
+        except JobCancelled:
+            partial.unlink(missing_ok=True)
+            raise
     os.replace(partial, destination)
+    if progress:
+        progress(100)
     log("Checksum verified; destination copy finalized.")
 
 
@@ -299,27 +462,92 @@ class Settings:
 
 
 class Runner:
-    def __init__(self, settings: Settings, log, progress):
+    def __init__(self, settings: Settings, log, progress, phase=None, cancel_event=None):
         self.s = settings
         self.log = log
         self.progress = progress
+        self.phase = phase or (lambda _message: None)
+        self.cancel_event = cancel_event or threading.Event()
+        self.current_process = None
+        self.process_lock = threading.Lock()
+        self.cancel_cleanup_paths = set()
 
-    def run(self, args, capture=False, check=True):
+    def check_cancelled(self):
+        if self.cancel_event.is_set():
+            raise JobCancelled("The active job was cancelled.")
+
+    def cancel(self):
+        self.cancel_event.set()
+        with self.process_lock:
+            process = self.current_process
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    def register_cancel_cleanup(self, path: Path):
+        self.cancel_cleanup_paths.add(Path(path))
+
+    def finish_cancel_cleanup(self, path: Path):
+        self.cancel_cleanup_paths.discard(Path(path))
+
+    def cleanup_cancelled_job(self):
+        staging_root = Path(self.s.staging).resolve()
+        for path in list(self.cancel_cleanup_paths):
+            try:
+                resolved = path.resolve()
+                if resolved != staging_root and staging_root in resolved.parents:
+                    shutil.rmtree(resolved, ignore_errors=True)
+            finally:
+                self.cancel_cleanup_paths.discard(path)
+
+    def begin_phase(self, message):
+        self.check_cancelled()
+        self.phase(message)
+        self.progress(0)
+
+    def run(self, args, capture=False, check=True, progress_parser=None, progress_line_filter=None):
+        self.check_cancelled()
         self.log("$ " + subprocess.list2cmdline([str(x) for x in args]))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and capture else 0
         if capture:
             p = subprocess.run([str(x) for x in args], text=True, capture_output=True,
                                check=False, creationflags=flags)
+            self.check_cancelled()
             if check and p.returncode != 0:
                 raise RuntimeError((p.stderr or p.stdout or "Command failed").strip())
             return p
         p = subprocess.Popen([str(x) for x in args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, bufsize=1, universal_newlines=True,
                              creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
-        assert p.stdout
-        for line in p.stdout:
-            self.log(line.rstrip())
-        rc = p.wait()
+        with self.process_lock:
+            self.current_process = p
+        try:
+            assert p.stdout
+            for line in p.stdout:
+                self.check_cancelled()
+                text = line.rstrip()
+                percent = progress_parser(text) if progress_parser else None
+                if percent is not None:
+                    self.progress(percent)
+                if not progress_line_filter or not progress_line_filter(text):
+                    self.log(text)
+            rc = p.wait()
+        finally:
+            if self.cancel_event.is_set() and p.poll() is None:
+                try:
+                    p.terminate()
+                    p.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+                except OSError:
+                    pass
+            with self.process_lock:
+                if self.current_process is p:
+                    self.current_process = None
+        self.check_cancelled()
         if check and rc != 0:
             raise RuntimeError(f"Command exited with code {rc}")
         return rc
@@ -407,15 +635,18 @@ class Runner:
         video = next((x for x in streams if x.get("codec_type") == "video"), None)
         if not video: raise RuntimeError(f"No video stream found in {path}")
         duration = float((data.get("format") or {}).get("duration", "0") or 0)
+        container = str((data.get("format") or {}).get("format_name") or "unknown")
         return MediaInfo(str(video.get("codec_name") or ""), duration,
                          int(video.get("width") or 0), int(video.get("height") or 0),
                          str(video.get("display_aspect_ratio") or ""),
                          sum(1 for x in streams if x.get("codec_type") == "audio"),
-                         sum(1 for x in streams if x.get("codec_type") == "subtitle"))
+                         sum(1 for x in streams if x.get("codec_type") == "subtitle"),
+                         str(video.get("field_order") or "unknown"), container)
 
-    def enhanced(self, source: Path, output: Path):
+    def enhanced(self, source: Path, output: Path, duration=None):
         self.require("handbrake")
         output.unlink(missing_ok=True)
+        self.begin_phase(f"Encoding Enhanced version: {output.name}")
         args = [self.s.handbrake, "-i", str(source), "-o", str(output),
                 "-f", "av_mkv", "-e", "x264", "-q", str(self.s.crf), "--encoder-preset", self.s.hb_preset,
                 "--comb-detect", "--decomb", "--vfr",
@@ -423,27 +654,38 @@ class Runner:
                 "--audio-copy-mask", "aac,ac3,eac3,truehd,dts,dtshd,mp2,mp3,flac",
                 "--audio-fallback", "ac3",
                 "--all-subtitles", "--markers", "--non-anamorphic"]
-        self.run(args)
+        self.run(args, progress_parser=parse_handbrake_progress,
+                 progress_line_filter=lambda line: parse_handbrake_progress(line) is not None)
         if not output.exists(): raise RuntimeError("HandBrake did not create the Enhanced DVD output.")
+        self.progress(100)
 
-    def upscale(self, source: Path, output: Path):
+    def upscale(self, source: Path, output: Path, duration=None):
         self.require("ffmpeg")
         output.unlink(missing_ok=True)
+        if duration is None:
+            duration = self.ffprobe(source).duration
+        self.begin_phase(f"Encoding 1080p version: {output.name}")
         vf = "bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=w='trunc(1080*dar/2)*2':h=1080:flags=lanczos,setsar=1"
-        args = [self.s.ffmpeg, "-hide_banner", "-y", "-i", str(source),
+        subtitle_codec = "srt" if source.suffix.lower() in {".mp4", ".m4v"} else "copy"
+        args = [self.s.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(source),
                 "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map_metadata", "0", "-map_chapters", "0",
                 "-vf", vf, "-c:v", "libx264", "-preset", self.s.preset, "-crf", str(self.s.crf),
-                "-pix_fmt", "yuv420p", "-c:a", "copy", "-c:s", "copy", "-max_muxing_queue_size", "4096", str(output)]
-        rc = self.run(args, check=False)
+                "-pix_fmt", "yuv420p", "-c:a", "copy", "-c:s", subtitle_codec,
+                "-max_muxing_queue_size", "4096", "-progress", "pipe:1", "-nostats", str(output)]
+        parser = lambda line: parse_ffmpeg_progress(line, duration)
+        rc = self.run(args, check=False, progress_parser=parser, progress_line_filter=is_ffmpeg_progress_line)
         if rc != 0:
             # Retry with yadif on builds lacking bwdif.
             vf = "yadif=mode=send_frame:parity=auto:deint=interlaced,scale=w='trunc(1080*dar/2)*2':h=1080:flags=lanczos,setsar=1"
             args[args.index("-vf") + 1] = vf
             self.log("Retrying with yadif deinterlacing...")
-            self.run(args)
+            self.begin_phase(f"Retrying 1080p encoding: {output.name}")
+            self.run(args, progress_parser=parser, progress_line_filter=is_ffmpeg_progress_line)
         if not output.exists(): raise RuntimeError("FFmpeg did not create the 1080p output.")
+        self.progress(100)
 
     def validate_processed(self, source_info, output, target="1080"):
+        self.begin_phase(f"Validating output: {Path(output).name}")
         out = self.ffprobe(output)
         if out.codec != "h264": raise RuntimeError(f"Processed file codec is {out.codec}, expected H.264.")
         if target == "1080" and not (1000 <= out.height <= 1100):
@@ -454,6 +696,7 @@ class Runner:
             self.log(f"WARNING: audio tracks decreased {source_info.audio_tracks} -> {out.audio_tracks}")
         if out.subtitle_tracks < source_info.subtitle_tracks:
             self.log(f"WARNING: subtitle tracks decreased {source_info.subtitle_tracks} -> {out.subtitle_tracks}")
+        self.progress(100)
         return out
 
     def rip_title(self, disc_title: DiscTitle, meta: MovieMetadata, mode: str):
@@ -469,6 +712,7 @@ class Runner:
         base = f"{sanitize_title(meta.title)} ({meta.year}) [tmdbid-{meta.tmdb_id}]"
         job = staging_root / "rip-jobs" / f"{stamp}-title-{disc_title.title_id}"
         job.mkdir(parents=True, exist_ok=True)
+        self.register_cancel_cleanup(job)
         self.log(f"Ripping DVD title {disc_title.title_id}: {base}")
         self.run([self.s.makemkv, "mkv", self.s.dvd_source, str(disc_title.title_id), str(job)])
         mkvs = list(job.glob("*.mkv"))
@@ -483,24 +727,25 @@ class Runner:
         processed_name = None
         if mode == MODE_ENHANCED:
             processed = job / f"{base} - {native} Enhanced.mkv"
-            self.enhanced(raw_named, processed)
+            self.enhanced(raw_named, processed, info.duration)
             self.validate_processed(info, processed, target="native")
             processed_name = processed.name
         elif mode == MODE_UPSCALE:
             processed = job / f"{base} - 1080p.mkv"
-            self.upscale(raw_named, processed)
+            self.upscale(raw_named, processed, info.duration)
             self.validate_processed(info, processed, target="1080")
             processed_name = processed.name
         dest_dir = movies_root / base
         if (dest_dir / raw_named.name).exists(): raise RuntimeError(f"Destination already exists: {dest_dir / raw_named.name}")
         if processed and (dest_dir / processed.name).exists(): raise RuntimeError(f"Destination already exists: {dest_dir / processed.name}")
-        copy_verified(raw_named, dest_dir / raw_named.name, self.log, self.progress)
+        copy_verified(raw_named, dest_dir / raw_named.name, self.log, self.progress, self.phase, self.check_cancelled)
         if processed:
-            copy_verified(processed, dest_dir / processed.name, self.log, self.progress)
+            copy_verified(processed, dest_dir / processed.name, self.log, self.progress, self.phase, self.check_cancelled)
         raw_named.unlink(missing_ok=True)
         if processed: processed.unlink(missing_ok=True)
         try: job.rmdir()
         except OSError: pass
+        self.finish_cancel_cleanup(job)
         self.log(f"COMPLETE: {dest_dir}")
         self.log(f"  {raw_named.name}")
         if processed_name: self.log(f"  {processed_name}")
@@ -520,15 +765,16 @@ class Runner:
             raise RuntimeError(f"A 1080p version already exists: {target}")
         stage = Path(self.s.staging) / "upscale-jobs" / datetime.now().strftime("%Y%m%d-%H%M%S")
         stage.mkdir(parents=True, exist_ok=True)
+        self.register_cancel_cleanup(stage)
         encoded = stage / f"{sanitize_title(base)} - 1080p.mkv"
-        self.upscale(source, encoded)
+        self.upscale(source, encoded, source_info.duration)
         encoded_info = self.validate_processed(source_info, encoded, target="1080")
         # Rename old single-version file only after successful encode.
         if original_dest != source:
             if original_dest.exists(): raise RuntimeError(f"Cannot rename original; destination exists: {original_dest}")
             source.rename(original_dest)
             source = original_dest
-        copy_verified(encoded, target, self.log, self.progress)
+        copy_verified(encoded, target, self.log, self.progress, self.phase, self.check_cancelled)
         final = self.ffprobe(target)
         if final.height != encoded_info.height or abs(final.duration - encoded_info.duration) > 2:
             target.unlink(missing_ok=True)
@@ -536,9 +782,104 @@ class Runner:
         encoded.unlink(missing_ok=True)
         try: stage.rmdir()
         except OSError: pass
+        self.finish_cancel_cleanup(stage)
         self.log("1080p VERSION ADDED")
         self.log(f"Original: {source.name}")
         self.log(f"1080p:    {target.name}")
+
+    def analyze_existing(self, source: Path):
+        self.require("ffprobe")
+        if not source.exists():
+            raise RuntimeError("Source video no longer exists.")
+        if not is_supported_video(source):
+            raise RuntimeError("Source must be an MKV, MP4, or M4V file.")
+        info = self.ffprobe(source)
+        if info.width <= 0 or info.height <= 0 or info.duration <= 0:
+            raise RuntimeError("FFprobe could not identify a valid video stream and duration.")
+        recommendation, reason = recommend_existing_processing(info)
+        return info, recommendation, reason
+
+    def process_existing(self, source: Path, mode: str):
+        if mode not in {PROCESS_ENHANCED, PROCESS_UPSCALE, PROCESS_BOTH}:
+            raise RuntimeError(f"Unsupported processing mode: {mode}")
+        source_info, recommendation, reason = self.analyze_existing(source)
+        self.log(analysis_summary(source, source_info, recommendation, reason))
+        if mode in {PROCESS_ENHANCED, PROCESS_BOTH}:
+            self.require("handbrake")
+        if mode in {PROCESS_UPSCALE, PROCESS_BOTH}:
+            self.require("ffmpeg")
+
+        folder = source.parent
+        base = existing_video_base(source)
+        native = resolution_label(source_info)
+        enhanced_target = folder / f"{base} - {native} Enhanced.mkv"
+        upscale_target = folder / f"{base} - 1080p.mkv"
+
+        if mode in {PROCESS_ENHANCED, PROCESS_BOTH}:
+            if enhanced_target == source:
+                raise RuntimeError("The selected source is already the Enhanced version.")
+            if enhanced_target.exists():
+                raise RuntimeError(f"Enhanced version already exists: {enhanced_target}")
+        if mode in {PROCESS_UPSCALE, PROCESS_BOTH}:
+            if upscale_target == source:
+                raise RuntimeError("The selected source is already the 1080p version.")
+            if upscale_target.exists():
+                raise RuntimeError(f"A 1080p version already exists: {upscale_target}")
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        stage = Path(self.s.staging) / "process-video-jobs" / stamp
+        stage.mkdir(parents=True, exist_ok=True)
+        self.register_cancel_cleanup(stage)
+        enhanced_encoded = None
+        upscale_encoded = None
+
+        if mode in {PROCESS_ENHANCED, PROCESS_BOTH}:
+            enhanced_encoded = stage / f"{sanitize_title(base)} - {native} Enhanced.mkv"
+            self.log(f"Encoding Enhanced version locally: {enhanced_encoded}")
+            self.enhanced(source, enhanced_encoded, source_info.duration)
+            self.validate_processed(source_info, enhanced_encoded, target="native")
+        if mode in {PROCESS_UPSCALE, PROCESS_BOTH}:
+            upscale_encoded = stage / f"{sanitize_title(base)} - 1080p.mkv"
+            self.log(f"Encoding 1080p version locally: {upscale_encoded}")
+            self.upscale(source, upscale_encoded, source_info.duration)
+            self.validate_processed(source_info, upscale_encoded, target="1080")
+
+        completed = []
+        if enhanced_encoded:
+            copy_verified(
+                enhanced_encoded, enhanced_target, self.log, self.progress, self.phase, self.check_cancelled
+            )
+            try:
+                self.validate_processed(source_info, enhanced_target, target="native")
+            except Exception:
+                enhanced_target.unlink(missing_ok=True)
+                raise
+            completed.append(enhanced_target)
+        if upscale_encoded:
+            copy_verified(
+                upscale_encoded, upscale_target, self.log, self.progress, self.phase, self.check_cancelled
+            )
+            try:
+                self.validate_processed(source_info, upscale_target, target="1080")
+            except Exception:
+                upscale_target.unlink(missing_ok=True)
+                raise
+            completed.append(upscale_target)
+
+        if enhanced_encoded:
+            enhanced_encoded.unlink(missing_ok=True)
+        if upscale_encoded:
+            upscale_encoded.unlink(missing_ok=True)
+        try:
+            stage.rmdir()
+        except OSError:
+            pass
+        self.finish_cancel_cleanup(stage)
+        self.log("EXISTING VIDEO PROCESSING COMPLETE")
+        self.log(f"Original: {source.name} (unchanged)")
+        for path in completed:
+            self.log(f"Added:    {path.name}")
+        return completed
 
 
 class MetadataDialog(tk.Toplevel):
@@ -640,6 +981,13 @@ class App(tk.Tk):
         self.status_labels = {}
         self.dvd_choices = {}
         self.optical_drives = []
+        self.analyzed_source = None
+        self.analyzed_info = None
+        self.analyzed_recommendation = None
+        self.analyzed_reason = None
+        self.job_running = False
+        self.cancel_event = threading.Event()
+        self.active_runner = None
         self._build()
         self.after(150, self.refresh_setup_status)
         self.after(100, self._drain)
@@ -663,14 +1011,38 @@ class App(tk.Tk):
     def _build(self):
         nb = ttk.Notebook(self); nb.pack(fill="both", expand=True, padx=10, pady=10)
         self.rip_tab = ttk.Frame(nb, padding=10); nb.add(self.rip_tab, text="Rip DVD")
-        self.up_tab = ttk.Frame(nb, padding=10); nb.add(self.up_tab, text="Add 1080p Version")
+        self.up_tab = ttk.Frame(nb, padding=10); nb.add(self.up_tab, text="Process Existing Video")
         self.set_tab = ttk.Frame(nb, padding=10); nb.add(self.set_tab, text="Settings")
         self.about_tab = ttk.Frame(nb, padding=16); nb.add(self.about_tab, text="About")
         self._build_rip(); self._build_up(); self._build_settings(); self._build_about()
         lf = ttk.LabelFrame(self, text="Activity", padding=6); lf.pack(fill="both", expand=False, padx=10, pady=(0,10))
-        self.logbox = tk.Text(lf, height=8, wrap="word", state="disabled"); self.logbox.pack(fill="both", expand=True)
+        progress_header = ttk.Frame(lf); progress_header.pack(fill="x", pady=(0, 2))
+        self.activity_status = tk.StringVar(value="Idle")
+        self.activity_percent = tk.StringVar(value="0%")
+        ttk.Label(progress_header, textvariable=self.activity_status).pack(side="left")
+        ttk.Label(progress_header, textvariable=self.activity_percent).pack(side="right")
+        self.cancel_job_button = ttk.Button(
+            progress_header,
+            text="Cancel Active Job",
+            command=self.cancel_active_job,
+            state="disabled",
+        )
+        self.cancel_job_button.pack(side="right", padx=(0, 10))
         self.progress_var = tk.DoubleVar(value=0)
-        ttk.Progressbar(lf, variable=self.progress_var, maximum=100).pack(fill="x", pady=(6,0))
+        ttk.Progressbar(lf, variable=self.progress_var, maximum=100).pack(fill="x", pady=(0, 6))
+        self.activity_log_frame = ttk.Frame(lf)
+        self.activity_log_frame.pack(fill="both", expand=True)
+        self.activity_log_scrollbar = ttk.Scrollbar(self.activity_log_frame, orient="vertical")
+        self.logbox = tk.Text(
+            self.activity_log_frame,
+            height=6,
+            wrap="word",
+            state="disabled",
+            yscrollcommand=self.activity_log_scrollbar.set,
+        )
+        self.activity_log_scrollbar.configure(command=self.logbox.yview)
+        self.activity_log_scrollbar.pack(side="right", fill="y")
+        self.logbox.pack(side="left", fill="both", expand=True)
 
     def _build_rip(self):
         top = ttk.Frame(self.rip_tab); top.pack(fill="x")
@@ -699,15 +1071,61 @@ class App(tk.Tk):
         self.mode_help.configure(text=MODE_DESCRIPTIONS.get(self.mode.get(), ""))
 
     def _build_up(self):
-        ttk.Label(self.up_tab, text="Create a non-destructive 1080-height H.264 version beside an existing Jellyfin movie.").pack(anchor="w", pady=(0,12))
+        ttk.Label(
+            self.up_tab,
+            text="Analyze an existing MKV, MP4, or M4V and create an Enhanced version, a 1080p version, or both.",
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            self.up_tab,
+            text="RipFoundry preserves the original and creates each selected output from that source.",
+            foreground="#5f6368",
+        ).pack(anchor="w", pady=(0, 12))
         row=ttk.Frame(self.up_tab); row.pack(fill="x")
         self.movie_query=tk.StringVar()
         ttk.Entry(row,textvariable=self.movie_query).pack(side="left",fill="x",expand=True)
         ttk.Button(row,text="Search Library",command=self.search_movies).pack(side="left",padx=(8,0))
-        self.movie_tree=ttk.Treeview(self.up_tab,columns=("path",),show="headings",selectmode="browse",height=15)
-        self.movie_tree.heading("path",text="Matching MKV files"); self.movie_tree.column("path",width=780)
+        ttk.Button(row,text="Choose Video...",command=self.browse_existing_video).pack(side="left",padx=(8,0))
+        self.movie_tree=ttk.Treeview(self.up_tab,columns=("path",),show="headings",selectmode="browse",height=8)
+        self.movie_tree.heading("path",text="Matching MKV, MP4, and M4V files"); self.movie_tree.column("path",width=780)
         self.movie_tree.pack(fill="both",expand=True,pady=10)
-        ttk.Button(self.up_tab,text="Add 1080p Version",command=self.start_upscale).pack(anchor="e")
+        self.movie_tree.bind("<<TreeviewSelect>>", self._existing_selection_changed)
+        analyze_row = ttk.Frame(self.up_tab); analyze_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(analyze_row, text="Step 1: Inspect the selected file before deciding what to create.").pack(side="left")
+        self.analyze_existing_button = ttk.Button(
+            analyze_row, text="Analyze Selected Video", command=self.analyze_selected_video
+        )
+        self.analyze_existing_button.pack(side="right")
+        analysis_frame = ttk.LabelFrame(self.up_tab, text="Analysis and recommendation", padding=(10, 7))
+        analysis_frame.pack(fill="x", pady=(0, 10))
+        self.analysis_text_scrollbar = ttk.Scrollbar(analysis_frame, orient="vertical")
+        self.analysis_text = tk.Text(
+            analysis_frame,
+            height=9,
+            wrap="word",
+            state="disabled",
+            relief="flat",
+            yscrollcommand=self.analysis_text_scrollbar.set,
+        )
+        self.analysis_text_scrollbar.configure(command=self.analysis_text.yview)
+        self.analysis_text_scrollbar.pack(side="right", fill="y")
+        self.analysis_text.pack(side="left", fill="x", expand=True)
+        actions = ttk.Frame(self.up_tab); actions.pack(fill="x")
+        ttk.Label(actions, text="Step 2: Choose what to create:").pack(side="left")
+        self.existing_mode = tk.StringVar(value="")
+        self.existing_mode_combo = ttk.Combobox(
+            actions,
+            textvariable=self.existing_mode,
+            values=[PROCESS_ENHANCED, PROCESS_UPSCALE, PROCESS_BOTH],
+            state="readonly",
+            width=32,
+        )
+        self.existing_mode_combo.pack(side="left", padx=8)
+        self.existing_mode_combo.bind("<<ComboboxSelected>>", self._existing_mode_changed)
+        self.process_existing_button = ttk.Button(
+            actions, text="Process Video", command=self.start_existing_processing, state="disabled"
+        )
+        self.process_existing_button.pack(side="right")
+        self._clear_existing_analysis()
 
     def _helper(self, parent, text, row, column=0, columnspan=4):
         label = ttk.Label(parent, text=text, foreground="#5f6368", wraplength=760, justify="left")
@@ -746,7 +1164,7 @@ class App(tk.Tk):
         download = ttk.Button(parent, text="Download", command=lambda: webbrowser.open(DOWNLOAD_URLS[download_key]))
         download.grid(row=row, column=4, pady=(6, 2))
         ToolTip(download, "Open the official download page in your browser.")
-        suffix = " Required when you choose Enhanced DVD mode." if optional else ""
+        suffix = " Required whenever you choose an Enhanced output." if optional else ""
         self._helper(parent, description + suffix, row + 1, column=2, columnspan=3)
 
     def _path_setting(self, parent, row, key, title, description):
@@ -796,7 +1214,7 @@ class App(tk.Tk):
         )
         self._tool_row(
             deps, 2, "ffmpeg", "FFmpeg",
-            "ffmpeg.exe creates the optional 1080p version. Download a Windows build from a provider linked by FFmpeg.org.",
+            "ffmpeg.exe creates optional 1080p versions from DVDs or existing videos. Download a Windows build from a provider linked by FFmpeg.org.",
             "ffmpeg",
         )
         self._tool_row(
@@ -806,7 +1224,7 @@ class App(tk.Tk):
         )
         self._tool_row(
             deps, 6, "handbrake", "HandBrakeCLI",
-            "HandBrakeCLI.exe creates the optional Enhanced DVD version. Use the command-line download, not only the desktop app.",
+            "HandBrakeCLI.exe creates optional Enhanced versions from DVDs or existing videos. Use the command-line download, not only the desktop app.",
             "handbrake", optional=True,
         )
         ttk.Button(deps, text="Auto-detect / Check Again", command=self.autodetect_tools).grid(
@@ -1019,9 +1437,20 @@ class App(tk.Tk):
         self.settings.save(); self.refresh_setup_status(); self.log("Settings saved.")
         messagebox.showinfo(APP_NAME,"Settings saved.")
 
-    def runner(self): return Runner(self.settings,self.log,self.set_progress)
+    def runner(self):
+        runner = Runner(
+            self.settings,
+            self.log,
+            self.set_progress,
+            self.set_activity,
+            self.cancel_event if self.job_running else None,
+        )
+        if self.job_running:
+            self.active_runner = runner
+        return runner
     def log(self,msg): self.q.put(("log",str(msg)))
     def set_progress(self,v): self.q.put(("progress",float(v)))
+    def set_activity(self,message): self.q.put(("activity",str(message)))
     def done(self,msg=None): self.q.put(("done",msg))
     def error(self,e): self.q.put(("error",str(e)))
 
@@ -1031,20 +1460,61 @@ class App(tk.Tk):
                 kind,val=self.q.get_nowait()
                 if kind=="log":
                     self.logbox.configure(state="normal"); self.logbox.insert("end",val+"\n"); self.logbox.see("end"); self.logbox.configure(state="disabled")
-                elif kind=="progress": self.progress_var.set(val)
+                elif kind=="progress":
+                    value=max(0.0,min(100.0,float(val)))
+                    self.progress_var.set(value)
+                    self.activity_percent.set(f"{value:.1f}%" if 0 < value < 100 else f"{int(value)}%")
+                elif kind=="activity":
+                    self.activity_status.set(val)
                 elif kind=="done":
-                    self.progress_var.set(0)
+                    self.progress_var.set(100); self.activity_percent.set("100%"); self.activity_status.set("Complete")
+                    self._set_job_running(False)
                     if val: messagebox.showinfo(APP_NAME,val)
+                elif kind=="cancelled":
+                    self.activity_status.set("Cancelled")
+                    self.logbox.configure(state="normal")
+                    self.logbox.insert("end", "CANCELLED: The active job and its partial staging output were removed.\n")
+                    self.logbox.see("end")
+                    self.logbox.configure(state="disabled")
+                    self._set_job_running(False)
+                    messagebox.showinfo(APP_NAME, val or "The active job was cancelled.")
                 elif kind=="error":
-                    self.progress_var.set(0); messagebox.showerror(APP_NAME,val)
+                    self.activity_status.set("Failed"); self._set_job_running(False); messagebox.showerror(APP_NAME,val)
         except queue.Empty: pass
         self.after(100,self._drain)
 
     def threaded(self,fn):
+        if self.job_running:
+            messagebox.showwarning(APP_NAME, "RipFoundry is already processing a job. Wait for it to finish before starting another.")
+            return
+        self.cancel_event.clear()
+        self.active_runner = None
+        self._set_job_running(True)
+        self.set_activity("Starting...")
+        self.set_progress(0)
         def work():
             try: fn()
+            except JobCancelled as e:
+                if self.active_runner:
+                    self.active_runner.cleanup_cancelled_job()
+                self.q.put(("cancelled", str(e)))
             except Exception as e: self.error(e)
         threading.Thread(target=work,daemon=True).start()
+
+    def cancel_active_job(self):
+        if not self.job_running or self.cancel_event.is_set():
+            return
+        if not messagebox.askyesno(
+            APP_NAME,
+            "Cancel the active job?\n\nThe encoder will stop, partial staging output will be removed, and the original video will remain unchanged.",
+        ):
+            return
+        self.cancel_event.set()
+        self.activity_status.set("Cancelling...")
+        self.cancel_job_button.configure(state="disabled")
+        self.log("Cancellation requested. Stopping the active process...")
+        if self.active_runner:
+            self.active_runner.cancel()
 
     def scan(self):
         self.save_settings_silent()
@@ -1093,6 +1563,8 @@ class App(tk.Tk):
             failures=[]
             for t,m in zip(chosen,metas):
                 try: r.rip_title(t,m,mode)
+                except JobCancelled:
+                    raise
                 except Exception as e:
                     self.log(f"FAILED title {t.title_id}: {e}"); failures.append(f"Title {t.title_id}: {e}")
             if failures: raise RuntimeError("Some titles failed:\n"+"\n".join(failures))
@@ -1103,26 +1575,151 @@ class App(tk.Tk):
     def search_movies(self):
         self.save_settings_silent()
         root=Path(self.settings.movies); q=self.movie_query.get().lower().strip()
+        self._clear_existing_analysis()
         for x in self.movie_tree.get_children(): self.movie_tree.delete(x)
         if not self.settings.movies.strip(): messagebox.showerror(APP_NAME,"Media Library Destination is not configured. Open Settings first."); return
         if not root.exists(): messagebox.showerror(APP_NAME,f"Media Library Destination unavailable:\n{root}"); return
         try:
             matches=[]
-            for p in root.rglob("*.mkv"):
+            candidates = set()
+            for pattern in ("*.mkv", "*.mp4", "*.m4v"):
+                candidates.update(root.rglob(pattern))
+            for p in sorted(candidates, key=lambda item: str(item).lower()):
                 text=(p.parent.name+" "+p.name).lower()
                 if not q or all(term in text for term in q.split()): matches.append(p)
                 if len(matches)>=100: break
             for i,p in enumerate(matches): self.movie_tree.insert("","end",iid=str(i),values=(str(p),))
-            self.log(f"Found {len(matches)} matching MKV file(s).")
+            self.log(f"Found {len(matches)} matching video file(s).")
         except Exception as e: messagebox.showerror(APP_NAME,str(e))
 
-    def start_upscale(self):
-        sel=self.movie_tree.selection()
-        if not sel: messagebox.showwarning(APP_NAME,"Select an MKV first."); return
-        source=Path(self.movie_tree.item(sel[0],"values")[0])
-        if not messagebox.askyesno(APP_NAME,f"Create a 1080p version from:\n\n{source.name}\n\nThe original will be preserved."): return
+    def browse_existing_video(self):
+        initial = self.settings.movies if self.settings.movies and Path(self.settings.movies).exists() else None
+        selected = filedialog.askopenfilename(
+            initialdir=initial,
+            title="Choose an existing video",
+            filetypes=[("Supported video", "*.mkv *.mp4 *.m4v"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        self._clear_existing_analysis()
+        for item in self.movie_tree.get_children():
+            self.movie_tree.delete(item)
+        self.movie_tree.insert("", "end", iid="selected", values=(selected,))
+        self.movie_tree.selection_set("selected")
+        self.movie_tree.focus("selected")
+
+    def _set_analysis_text(self, value):
+        self.analysis_text.configure(state="normal")
+        self.analysis_text.delete("1.0", "end")
+        self.analysis_text.insert("1.0", value)
+        self.analysis_text.configure(state="disabled")
+
+    def _clear_existing_analysis(self):
+        self.analyzed_source = None
+        self.analyzed_info = None
+        self.analyzed_recommendation = None
+        self.analyzed_reason = None
+        if hasattr(self, "existing_mode"):
+            self.existing_mode.set("")
+        if hasattr(self, "process_existing_button"):
+            self.process_existing_button.configure(state="disabled")
+        if hasattr(self, "analysis_text"):
+            self._set_analysis_text(
+                "Select a video and click Analyze Selected Video. RipFoundry will inspect the source and "
+                "recommend an output without creating or changing any files."
+            )
+
+    def _existing_selection_changed(self, _event=None):
+        selection = self.movie_tree.selection()
+        selected_source = Path(self.movie_tree.item(selection[0], "values")[0]) if selection else None
+        if selected_source != self.analyzed_source:
+            self._clear_existing_analysis()
+
+    def _existing_mode_changed(self, _event=None):
+        ready = not self.job_running and self.analyzed_source is not None and self.existing_mode.get() in {
+            PROCESS_ENHANCED, PROCESS_UPSCALE, PROCESS_BOTH
+        }
+        self.process_existing_button.configure(state="normal" if ready else "disabled")
+
+    def _set_job_running(self, running):
+        self.job_running = bool(running)
+        if hasattr(self, "analyze_existing_button"):
+            self.analyze_existing_button.configure(state="disabled" if running else "normal")
+        if hasattr(self, "existing_mode_combo"):
+            self.existing_mode_combo.configure(state="disabled" if running else "readonly")
+        if hasattr(self, "process_existing_button"):
+            self._existing_mode_changed()
+        if hasattr(self, "cancel_job_button"):
+            self.cancel_job_button.configure(state="normal" if running else "disabled")
+        if not running:
+            self.active_runner = None
+            self.cancel_event.clear()
+
+    def analyze_selected_video(self):
+        selection = self.movie_tree.selection()
+        if not selection:
+            messagebox.showwarning(APP_NAME, "Select an MKV, MP4, or M4V first.")
+            return
+        source = Path(self.movie_tree.item(selection[0], "values")[0])
         self.save_settings_silent()
-        def work(): self.runner().add_1080(source); self.done("1080p Jellyfin version added and verified.")
+        try:
+            info, recommendation, reason = self.runner().analyze_existing(source)
+        except Exception as exc:
+            self._clear_existing_analysis()
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self.analyzed_source = source
+        self.analyzed_info = info
+        self.analyzed_recommendation = recommendation
+        self.analyzed_reason = reason
+        guidance = (
+            "\n\nReview the recommendation, choose an output below, and click Process Video only if you want to continue."
+        )
+        if recommendation == PROCESS_NONE:
+            self.existing_mode.set("")
+            guidance = (
+                "\n\nNo processing is selected because RipFoundry found no clear benefit. You can stop here, or "
+                "choose an explicit output below if you still want one."
+            )
+        else:
+            self.existing_mode.set(recommendation)
+        self._set_analysis_text(analysis_summary(source, info, recommendation, reason) + guidance)
+        self._existing_mode_changed()
+        self.log(f"Analyzed existing video: {source.name}; recommendation: {recommendation}")
+
+    def start_existing_processing(self):
+        if self.job_running:
+            messagebox.showwarning(APP_NAME, "RipFoundry is already processing a job. Wait for it to finish before starting another.")
+            return
+        sel=self.movie_tree.selection()
+        if not sel: messagebox.showwarning(APP_NAME,"Select an MKV, MP4, or M4V first."); return
+        source=Path(self.movie_tree.item(sel[0],"values")[0])
+        if source != self.analyzed_source or self.analyzed_info is None:
+            messagebox.showwarning(APP_NAME, "Analyze the selected video before choosing a processing option.")
+            return
+        info = self.analyzed_info
+        selected_mode = self.existing_mode.get()
+        if selected_mode not in {PROCESS_ENHANCED, PROCESS_UPSCALE, PROCESS_BOTH}:
+            messagebox.showwarning(APP_NAME, "Choose Enhanced, 1080p, or Both before processing.")
+            return
+        base = existing_video_base(source)
+        native = resolution_label(info)
+        outputs = []
+        if selected_mode in {PROCESS_ENHANCED, PROCESS_BOTH}:
+            outputs.append(f"{base} - {native} Enhanced.mkv")
+        if selected_mode in {PROCESS_UPSCALE, PROCESS_BOTH}:
+            outputs.append(f"{base} - 1080p.mkv")
+        output_plan = "\n".join(f"  - {name}" for name in outputs)
+        prompt = (
+            f"Selected processing: {selected_mode}\n\nCreate:\n{output_plan}"
+            + "\n\nThe original will remain unchanged. Continue?"
+        )
+        if not messagebox.askyesno(APP_NAME, prompt):
+            return
+        def work():
+            completed = self.runner().process_existing(source, selected_mode)
+            names = "\n".join(path.name for path in completed)
+            self.done(f"Existing video processing completed and verified.\n\n{names}")
         self.threaded(work)
 
     def save_settings_silent(self):
