@@ -1,10 +1,14 @@
 # RipFoundry for Windows
 
+<a href="https://github.com/sponsors/kylereddoch"><img src="https://img.shields.io/badge/GitHub%20Sponsors-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=white" alt="GitHub Sponsors" height="20px"></a>
+<a href="https://ko-fi.com/kylereddoch"><img src="https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-fi" height="20px"></a>
+<a href="https://buymeacoffee.com/kylereddoch"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000" alt="Buy me a coffee" height="20px"></a>
+
 ![RipFoundry for Windows existing-video analysis and live encoding progress](docs/images/ripfoundry-windows.png)
 
 RipFoundry for Windows is the Windows-native GUI companion to [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux), the original project this version grew from. It rips DVDs and creates Jellyfin-ready movie versions while keeping the ripping, encoding, validation, and staging work on the Windows PC. Only completed and verified files are finalized in the configured media library.
 
-Version 1.2.0 adds guided processing for existing MKV, MP4, and M4V files, live progress reporting, a scrollable Activity log, single-job protection, and safe job cancellation.
+Version 1.3.0 adds guided DVD-extras handling, consistent MakeMKV title selection, cancellable DVD scanning, a modern Windows folder picker, clearer tool failures, and optional project-support links.
 
 ## Download and run
 
@@ -39,6 +43,7 @@ For MakeMKV, select `makemkvcon64.exe` or `makemkvcon.exe`, not the regular `Mak
 - Scans MakeMKV DVD titles and supports single-title or multi-title selection.
 - Uses TMDb-assisted metadata with a manual fallback.
 - Creates Jellyfin folders using `Movie Name (Year) [tmdbid-ID]` naming.
+- Rips bonus features into a lossless review area so they can be played, named, and categorized before being added to Jellyfin extras folders.
 - Retains the untouched MakeMKV remux when ripping a DVD.
 - Optionally creates a playback-friendly H.264 Enhanced version at the source resolution.
 - Optionally creates a separate H.264 1080p version with aspect-ratio-preserving scaling.
@@ -100,7 +105,7 @@ Paste a TMDb **API Read Access Token** into Settings. RipFoundry stores its conf
    - **Original DVD + Enhanced DVD** keeps the untouched remux and creates a native-resolution H.264 copy with HandBrakeCLI.
    - **Original DVD + 1080p** keeps the untouched remux and creates a separate 1080p H.264 copy with FFmpeg.
    - **Original DVD only** keeps only the untouched MakeMKV remux.
-4. Click **Rip Selected Title(s)**.
+4. Click **Rip Selected as Movie(s)**.
 5. Match each selected title to TMDb and confirm the plan.
 
 Completed files use Jellyfin multi-version naming such as:
@@ -110,6 +115,30 @@ Movie Name (Year) [tmdbid-123]\
     Movie Name (Year) [tmdbid-123] - 480p.mkv
     Movie Name (Year) [tmdbid-123] - 480p Enhanced.mkv
     Movie Name (Year) [tmdbid-123] - 1080p.mkv
+```
+
+### Rip DVD extras and featurettes
+
+DVD title records normally contain runtimes, sizes, and chapter counts but not the human names shown on the disc menu. Bonus features inherit the parent movie's TMDb identity; they do not get separate TMDb matches.
+
+1. Scan the DVD and select one or more bonus-feature titles.
+2. Click **Rip Selected as Extras**.
+3. Match the parent movie once in TMDb.
+4. Confirm the selected title numbers. RipFoundry losslessly remuxes them into a local review folder. The DVD stays inserted so you can rip the main movie afterward without rescanning.
+5. Click **Play** beside each staged title, enter its descriptive name, and choose a Jellyfin folder such as `featurettes`, `behind the scenes`, `deleted scenes`, `interviews`, or `trailers`.
+6. Review the exact destination paths and click **Add Extras to Library**.
+
+Each extra is copied with a temporary `.partial` filename and SHA-256 verified before its staged source is removed. Cancelling the review keeps the staged MKVs and makes no library changes.
+
+```text
+Movie Name (Year) [tmdbid-123]\
+    Movie Name (Year) [tmdbid-123] - 480p.mkv
+    featurettes\
+        Making the Movie.mkv
+    interviews\
+        Interview with the Director.mkv
+    trailers\
+        Theatrical Trailer.mkv
 ```
 
 ## Process an existing video
@@ -189,7 +218,15 @@ Run the built executable from inside `dist\RipFoundry`; keep its `_internal` fol
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 
-A traditional signed Windows installer remains a possible future improvement. The current 1.2.0 release is portable: extract the complete folder and run `RipFoundry.exe`.
+A traditional signed Windows installer remains a possible future improvement. The current 1.3.0 release is portable: extract the complete folder and run `RipFoundry.exe`.
+
+## Support RipFoundry
+
+If RipFoundry has been useful and you want to support future updates, you can contribute through any of these optional links:
+
+<a href="https://github.com/sponsors/kylereddoch"><img src="https://img.shields.io/badge/GitHub%20Sponsors-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=white" alt="GitHub Sponsors" height="24px"></a>
+<a href="https://ko-fi.com/kylereddoch"><img src="https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-fi" height="24px"></a>
+<a href="https://buymeacoffee.com/kylereddoch"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000" alt="Buy me a coffee" height="24px"></a>
 
 ## Project origins
 

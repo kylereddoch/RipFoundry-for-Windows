@@ -2,6 +2,28 @@
 
 All notable changes to RipFoundry for Windows are documented here.
 
+## 1.3.0 - 2026-08-19
+
+### Added
+
+- A guided DVD-extras workflow that losslessly stages selected titles for preview, naming, and placement in supported Jellyfin extras folders.
+- Parent-movie TMDb matching for bonus features without requiring a separate match for every extra.
+- All-or-nothing, SHA-256-verified publishing for a batch of DVD extras.
+- A modern Windows Explorer folder picker for media-library and staging locations, with a portable fallback.
+- GitHub Sponsors, Ko-fi, and Buy Me a Coffee support links and repository funding metadata.
+
+### Changed
+
+- DVD movie and extras actions now have separate, clearly labeled controls.
+- DVD scans now run through the standard job lifecycle with visible status, single-job protection, and cancellation support.
+- Command failures include recent tool output to make MakeMKV and encoder errors easier to diagnose.
+
+### Fixed
+
+- MakeMKV now receives the configured minimum-title-length filter during both scanning and ripping so title numbers remain consistent.
+- Cancelling a captured MakeMKV scan now stops the active process cleanly.
+- A cancelled or failed multi-extra publish no longer leaves a partially completed batch in the media library.
+
 ## 1.2.0 - 2026-08-13
 
 ### Added

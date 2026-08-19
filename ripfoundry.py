@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_NAME = "RipFoundry for Windows"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 REPOSITORY_URL = "https://github.com/kylereddoch/RipFoundry-for-Windows"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "RipFoundry"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -39,6 +39,17 @@ PROCESS_UPSCALE = "1080p only"
 PROCESS_BOTH = "Enhanced + 1080p"
 PROCESS_NONE = "No additional encode"
 SUPPORTED_VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v"}
+JELLYFIN_EXTRA_FOLDERS = (
+    "featurettes",
+    "behind the scenes",
+    "deleted scenes",
+    "interviews",
+    "scenes",
+    "shorts",
+    "clips",
+    "trailers",
+    "other",
+)
 
 
 class JobCancelled(RuntimeError):
@@ -88,6 +99,141 @@ def configure_windows_app_id() -> None:
         pass
 
 
+def _choose_windows_folder(parent, initialdir=None, title="Choose a folder") -> str:
+    """Show the modern Windows Explorer folder picker using IFileOpenDialog."""
+    import ctypes
+    import uuid
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+        @classmethod
+        def from_string(cls, value):
+            raw = uuid.UUID(value).bytes_le
+            return cls.from_buffer_copy(raw)
+
+    HRESULT = ctypes.c_long
+    ole32 = ctypes.OleDLL("ole32")
+    shell32 = ctypes.OleDLL("shell32")
+    coinit_result = ole32.CoInitializeEx(None, 0x2)  # COINIT_APARTMENTTHREADED
+    rpc_e_changed_mode = ctypes.c_long(0x80010106).value
+    if coinit_result not in (0, 1, rpc_e_changed_mode):
+        raise OSError(f"Windows could not initialize the folder picker (0x{coinit_result & 0xffffffff:08X}).")
+    should_uninitialize = coinit_result in (0, 1)
+
+    dialog = ctypes.c_void_p()
+    initial_item = ctypes.c_void_p()
+    result_item = ctypes.c_void_p()
+    display_name = ctypes.c_void_p()
+
+    def com_method(pointer, index, restype, *argtypes):
+        vtable = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+
+    def release(pointer):
+        if pointer and pointer.value:
+            com_method(pointer, 2, wintypes.ULONG)(pointer)
+            pointer.value = None
+
+    def require_success(result, action):
+        if result < 0:
+            raise OSError(f"Windows could not {action} (0x{result & 0xffffffff:08X}).")
+
+    try:
+        clsid_file_open_dialog = GUID.from_string("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")
+        iid_file_open_dialog = GUID.from_string("D57C7288-D4AD-4768-BE02-9D969532D960")
+        iid_shell_item = GUID.from_string("43826D1E-E718-42EE-BC55-A1E261C37BFE")
+        ole32.CoCreateInstance.argtypes = [
+            ctypes.POINTER(GUID), ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+        ]
+        ole32.CoCreateInstance.restype = HRESULT
+        require_success(
+            ole32.CoCreateInstance(
+                ctypes.byref(clsid_file_open_dialog), None, 0x1,
+                ctypes.byref(iid_file_open_dialog), ctypes.byref(dialog),
+            ),
+            "open the folder picker",
+        )
+
+        options = wintypes.DWORD()
+        require_success(
+            com_method(dialog, 10, HRESULT, ctypes.POINTER(wintypes.DWORD))(
+                dialog, ctypes.byref(options)
+            ),
+            "read folder picker options",
+        )
+        # FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
+        options.value |= 0x20 | 0x40 | 0x800 | 0x8
+        require_success(
+            com_method(dialog, 9, HRESULT, wintypes.DWORD)(dialog, options.value),
+            "configure the folder picker",
+        )
+        require_success(
+            com_method(dialog, 17, HRESULT, wintypes.LPCWSTR)(dialog, title),
+            "set the folder picker title",
+        )
+        require_success(
+            com_method(dialog, 18, HRESULT, wintypes.LPCWSTR)(dialog, "Select Folder"),
+            "label the folder picker button",
+        )
+
+        initial_path = Path(initialdir).expanduser() if initialdir else None
+        if initial_path and initial_path.is_dir():
+            shell32.SHCreateItemFromParsingName.argtypes = [
+                wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(GUID),
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            shell32.SHCreateItemFromParsingName.restype = HRESULT
+            if shell32.SHCreateItemFromParsingName(
+                str(initial_path), None, ctypes.byref(iid_shell_item), ctypes.byref(initial_item)
+            ) >= 0:
+                com_method(dialog, 12, HRESULT, ctypes.c_void_p)(dialog, initial_item)
+
+        owner = parent.winfo_id() if parent is not None else 0
+        result = com_method(dialog, 3, HRESULT, wintypes.HWND)(dialog, owner)
+        if result == ctypes.c_long(0x800704C7).value:  # ERROR_CANCELLED
+            return ""
+        require_success(result, "show the folder picker")
+        require_success(
+            com_method(dialog, 20, HRESULT, ctypes.POINTER(ctypes.c_void_p))(
+                dialog, ctypes.byref(result_item)
+            ),
+            "read the selected folder",
+        )
+        require_success(
+            com_method(result_item, 5, HRESULT, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))(
+                result_item, 0x80058000, ctypes.byref(display_name)
+            ),
+            "read the selected folder path",
+        )
+        return ctypes.wstring_at(display_name)
+    finally:
+        if display_name.value:
+            ole32.CoTaskMemFree(display_name)
+        release(result_item)
+        release(initial_item)
+        release(dialog)
+        if should_uninitialize:
+            ole32.CoUninitialize()
+
+
+def choose_folder(parent=None, initialdir=None, title="Choose a folder") -> str:
+    """Choose a folder with the modern Windows picker and a portable fallback."""
+    if os.name == "nt":
+        try:
+            return _choose_windows_folder(parent, initialdir, title)
+        except (OSError, ValueError):
+            pass
+    return filedialog.askdirectory(parent=parent, initialdir=initialdir, title=title)
+
+
 @dataclass
 class DiscTitle:
     title_id: int
@@ -106,6 +252,24 @@ class MovieMetadata:
     title: str
     year: str
     tmdb_id: int
+
+
+@dataclass
+class ExtraMetadata:
+    name: str
+    folder: str
+
+
+@dataclass
+class StagedExtra:
+    disc_title: DiscTitle
+    path: Path
+
+
+@dataclass
+class StagedExtrasBatch:
+    root: Path
+    items: list[StagedExtra]
 
 
 @dataclass
@@ -145,10 +309,63 @@ def clean_disc_label(label: str) -> str:
     return value.title() if value.isupper() else value
 
 
+def parse_makemkv_scan_output(output: str):
+    """Parse MakeMKV robot-mode disc and title records."""
+    attrs = {}
+    labels = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith("TINFO:"):
+            try:
+                row = next(csv.reader([line[len("TINFO:"):]], escapechar="\\"))
+                tid, aid = int(row[0]), int(row[1])
+                val = row[3] if len(row) > 3 else ""
+                attrs.setdefault(tid, {})[aid] = val
+            except (csv.Error, IndexError, StopIteration, TypeError, ValueError):
+                continue
+        elif line.startswith("CINFO:"):
+            try:
+                row = next(csv.reader([line[len("CINFO:"):]], escapechar="\\"))
+                aid = int(row[0])
+                val = row[2] if len(row) > 2 else ""
+                if aid in {2, 30, 32} and val.strip():
+                    labels.append(val.strip())
+            except (csv.Error, IndexError, StopIteration, TypeError, ValueError):
+                continue
+
+    titles = []
+    for tid, info in sorted(attrs.items()):
+        duration = info.get(9, "")
+        if not duration:
+            continue
+        try:
+            size_bytes = int(info.get(11, "0") or "0")
+        except ValueError:
+            size_bytes = 0
+        titles.append(DiscTitle(
+            tid,
+            info.get(2, ""),
+            info.get(8, ""),
+            duration,
+            parse_duration(duration),
+            info.get(10, ""),
+            size_bytes,
+            info.get(16, ""),
+            info.get(27, ""),
+        ))
+
+    label = next((x for x in labels if x.lower() not in {"dvd", "dvd disc"}), "")
+    return titles, clean_disc_label(label)
+
+
 def sanitize_title(value: str) -> str:
     value = INVALID_FILENAME_CHARS.sub("-", value)
     value = re.sub(r"\s+", " ", value).strip().rstrip(". ")
     return value or "Untitled"
+
+
+def movie_library_base(meta: MovieMetadata) -> str:
+    return f"{sanitize_title(meta.title)} ({meta.year}) [tmdbid-{meta.tmdb_id}]"
 
 
 def resolution_label(info: MediaInfo) -> str:
@@ -502,32 +719,62 @@ class Runner:
             finally:
                 self.cancel_cleanup_paths.discard(path)
 
-    def begin_phase(self, message):
+    def begin_phase(self, message, initial_progress=0):
         self.check_cancelled()
         self.phase(message)
-        self.progress(0)
+        self.progress(initial_progress)
 
     def run(self, args, capture=False, check=True, progress_parser=None, progress_line_filter=None):
         self.check_cancelled()
         self.log("$ " + subprocess.list2cmdline([str(x) for x in args]))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and capture else 0
         if capture:
-            p = subprocess.run([str(x) for x in args], text=True, capture_output=True,
-                               check=False, creationflags=flags)
+            command = [str(x) for x in args]
+            p = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 creationflags=flags)
+            with self.process_lock:
+                self.current_process = p
+            stdout = ""
+            stderr = ""
+            try:
+                while True:
+                    try:
+                        stdout, stderr = p.communicate(timeout=0.2)
+                        break
+                    except subprocess.TimeoutExpired:
+                        self.check_cancelled()
+            finally:
+                if self.cancel_event.is_set() and p.poll() is None:
+                    try:
+                        p.terminate()
+                        p.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                        p.wait()
+                    except OSError:
+                        pass
+                with self.process_lock:
+                    if self.current_process is p:
+                        self.current_process = None
             self.check_cancelled()
-            if check and p.returncode != 0:
-                raise RuntimeError((p.stderr or p.stdout or "Command failed").strip())
-            return p
+            result = subprocess.CompletedProcess(command, p.returncode, stdout, stderr)
+            if check and result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "Command failed").strip())
+            return result
         p = subprocess.Popen([str(x) for x in args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, bufsize=1, universal_newlines=True,
                              creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
         with self.process_lock:
             self.current_process = p
+        recent_output = []
         try:
             assert p.stdout
             for line in p.stdout:
                 self.check_cancelled()
                 text = line.rstrip()
+                recent_output.append(text)
+                if len(recent_output) > 20:
+                    recent_output.pop(0)
                 percent = progress_parser(text) if progress_parser else None
                 if percent is not None:
                     self.progress(percent)
@@ -535,6 +782,8 @@ class Runner:
                     self.log(text)
             rc = p.wait()
         finally:
+            if p.stdout:
+                p.stdout.close()
             if self.cancel_event.is_set() and p.poll() is None:
                 try:
                     p.terminate()
@@ -549,7 +798,11 @@ class Runner:
                     self.current_process = None
         self.check_cancelled()
         if check and rc != 0:
-            raise RuntimeError(f"Command exited with code {rc}")
+            details = "\n".join(recent_output[-8:]).strip()
+            message = f"Command exited with code {rc}"
+            if details:
+                message += f"\n\n{details}"
+            raise RuntimeError(message)
         return rc
 
     def require(self, *names):
@@ -562,6 +815,19 @@ class Runner:
         if missing:
             raise RuntimeError("Missing tool path(s): " + ", ".join(missing) + ". Configure them in Settings.")
 
+    def makemkv_title_command(self, title_id: int, output: Path) -> list[str]:
+        # MakeMKV assigns title indexes after applying its minimum-length filter.
+        # Use the scan threshold again so the selected index still identifies the
+        # same title, including extras shorter than MakeMKV's 120-second default.
+        return [
+            self.s.makemkv,
+            f"--minlength={self.s.scan_min_length}",
+            "mkv",
+            self.s.dvd_source,
+            str(title_id),
+            str(output),
+        ]
+
     def scan_disc(self):
         self.require("makemkv")
         p = self.run([self.s.makemkv, "-r", f"--minlength={self.s.scan_min_length}",
@@ -569,35 +835,9 @@ class Runner:
         output = (p.stdout or "") + "\n" + (p.stderr or "")
         if p.returncode != 0:
             raise RuntimeError("MakeMKV could not scan the DVD.\n" + output[-2000:])
-        attrs = {}
-        labels = []
-        for raw in output.splitlines():
-            line = raw.strip()
-            if line.startswith("TINFO:"):
-                try:
-                    row = next(csv.reader([line[len("TINFO:"):]], escapechar="\\"))
-                    tid, aid = int(row[0]), int(row[1])
-                    val = row[3] if len(row) > 3 else ""
-                    attrs.setdefault(tid, {})[aid] = val
-                except Exception: pass
-            elif line.startswith("CINFO:"):
-                try:
-                    row = next(csv.reader([line[len("CINFO:"):]], escapechar="\\"))
-                    aid = int(row[0]); val = row[2] if len(row) > 2 else ""
-                    if aid in {2, 30, 32} and val.strip(): labels.append(val.strip())
-                except Exception: pass
-        titles = []
-        for tid, info in sorted(attrs.items()):
-            duration = info.get(9, "")
-            if not duration: continue
-            try: size_bytes = int(info.get(11, "0") or "0")
-            except ValueError: size_bytes = 0
-            titles.append(DiscTitle(tid, info.get(2, ""), info.get(8, ""), duration,
-                                    parse_duration(duration), info.get(10, ""), size_bytes,
-                                    info.get(16, ""), info.get(27, "")))
+        titles, label = parse_makemkv_scan_output(output)
         if not titles: raise RuntimeError("No usable DVD titles were found.")
-        label = next((x for x in labels if x.lower() not in {"dvd", "dvd disc"}), "")
-        return titles, clean_disc_label(label)
+        return titles, label
 
     def tmdb_search(self, query):
         if not self.s.tmdb_token:
@@ -709,12 +949,12 @@ class Runner:
         if not self.s.movies.strip(): raise RuntimeError("Media Library Destination is not configured. Open Settings and choose a destination folder.")
         if not movies_root.exists(): raise RuntimeError(f"Media Library Destination is unavailable: {movies_root}")
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        base = f"{sanitize_title(meta.title)} ({meta.year}) [tmdbid-{meta.tmdb_id}]"
+        base = movie_library_base(meta)
         job = staging_root / "rip-jobs" / f"{stamp}-title-{disc_title.title_id}"
         job.mkdir(parents=True, exist_ok=True)
         self.register_cancel_cleanup(job)
         self.log(f"Ripping DVD title {disc_title.title_id}: {base}")
-        self.run([self.s.makemkv, "mkv", self.s.dvd_source, str(disc_title.title_id), str(job)])
+        self.run(self.makemkv_title_command(disc_title.title_id, job))
         mkvs = list(job.glob("*.mkv"))
         if len(mkvs) != 1: raise RuntimeError(f"Expected one MKV from MakeMKV; found {len(mkvs)}.")
         raw = mkvs[0]
@@ -749,6 +989,117 @@ class Runner:
         self.log(f"COMPLETE: {dest_dir}")
         self.log(f"  {raw_named.name}")
         if processed_name: self.log(f"  {processed_name}")
+
+    def stage_extra_titles(self, disc_titles: list[DiscTitle], meta: MovieMetadata) -> StagedExtrasBatch:
+        self.require("makemkv", "ffprobe")
+        if not disc_titles:
+            raise RuntimeError("Select at least one DVD extra.")
+        staging_root = Path(self.s.staging)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        review_root = staging_root / "extra-review" / f"{stamp}-{sanitize_title(meta.title)}"
+        review_root.mkdir(parents=True, exist_ok=False)
+        self.register_cancel_cleanup(review_root)
+        staged = []
+        total = len(disc_titles)
+        for index, disc_title in enumerate(disc_titles, start=1):
+            self.begin_phase(
+                f"Ripping DVD extra {index} of {total}: title {disc_title.title_id} ({disc_title.duration})",
+                (index - 1) / total * 100,
+            )
+            title_root = review_root / f"title-{disc_title.title_id}"
+            title_root.mkdir()
+            self.run(self.makemkv_title_command(disc_title.title_id, title_root))
+            mkvs = list(title_root.glob("*.mkv"))
+            if len(mkvs) != 1:
+                raise RuntimeError(
+                    f"Expected one MKV for DVD title {disc_title.title_id}; found {len(mkvs)}."
+                )
+            source = mkvs[0]
+            info = self.ffprobe(source)
+            if info.duration <= 0:
+                raise RuntimeError(f"DVD title {disc_title.title_id} failed duration validation.")
+            staged_path = review_root / f"DVD Title {disc_title.title_id} - {disc_title.duration.replace(':', '-')}.mkv"
+            source.rename(staged_path)
+            title_root.rmdir()
+            staged.append(StagedExtra(disc_title, staged_path))
+            self.progress(index / total * 100)
+        self.finish_cancel_cleanup(review_root)
+        self.log(f"DVD extras are ready for review: {review_root}")
+        return StagedExtrasBatch(review_root, staged)
+
+    def publish_extras(
+        self,
+        batch: StagedExtrasBatch,
+        meta: MovieMetadata,
+        plans: list[ExtraMetadata],
+    ) -> list[Path]:
+        if len(batch.items) != len(plans):
+            raise RuntimeError("The number of extra names does not match the staged DVD titles.")
+        if not self.s.movies.strip():
+            raise RuntimeError("Media Library Destination is not configured. Open Settings first.")
+        movies_root = Path(self.s.movies)
+        if not movies_root.exists():
+            raise RuntimeError(f"Media Library Destination is unavailable: {movies_root}")
+        movie_root = movies_root / movie_library_base(meta)
+        prepared = []
+        unique_destinations = set()
+        for staged, plan in zip(batch.items, plans):
+            folder = plan.folder.strip().lower()
+            if folder not in JELLYFIN_EXTRA_FOLDERS:
+                raise RuntimeError(f"Unsupported Jellyfin extras folder: {plan.folder}")
+            name = sanitize_title(plan.name)
+            destination = movie_root / folder / f"{name}.mkv"
+            destination_key = str(destination).casefold()
+            if destination_key in unique_destinations:
+                raise RuntimeError(f"Two selected extras would use the same destination: {destination}")
+            if destination.exists():
+                raise RuntimeError(f"Destination already exists: {destination}")
+            if not staged.path.is_file():
+                raise RuntimeError(f"Staged DVD extra is missing: {staged.path}")
+            unique_destinations.add(destination_key)
+            prepared.append((staged, destination))
+
+        completed = []
+        total = len(prepared)
+        try:
+            for index, (staged, destination) in enumerate(prepared, start=1):
+                self.begin_phase(f"Adding extra {index} of {total}: {destination.name}")
+                copy_verified(
+                    staged.path,
+                    destination,
+                    self.log,
+                    lambda value, index=index: self.progress(((index - 1) + value / 100) / total * 100),
+                    self.phase,
+                    self.check_cancelled,
+                )
+                completed.append(destination)
+        except Exception:
+            # The destinations were preflighted as new files, so removing any
+            # files finalized by this batch restores the library to its original
+            # state while leaving every staged source available for another try.
+            for _staged, destination in prepared:
+                destination.with_name(destination.name + ".partial").unlink(missing_ok=True)
+            for destination in completed:
+                destination.unlink(missing_ok=True)
+                try:
+                    destination.parent.rmdir()
+                except OSError:
+                    pass
+            raise
+
+        for staged, _destination in prepared:
+            staged.path.unlink(missing_ok=True)
+        try:
+            batch.root.rmdir()
+            batch.root.parent.rmdir()
+        except OSError:
+            pass
+        self.log("DVD EXTRAS COMPLETE")
+        self.log(f"Movie: {movie_root}")
+        for destination in completed:
+            self.log(f"Extra: {destination.relative_to(movie_root)}")
+        return completed
 
     def add_1080(self, source: Path):
         self.require("ffmpeg", "ffprobe")
@@ -940,6 +1291,122 @@ class MetadataDialog(tk.Toplevel):
         self.result = MovieMetadata(title, year, int(tid)); self.destroy()
 
 
+class ExtrasReviewDialog(tk.Toplevel):
+    def __init__(self, parent, batch: StagedExtrasBatch, meta: MovieMetadata):
+        super().__init__(parent)
+        self.title("Review and Name DVD Extras")
+        self.geometry("980x560")
+        self.minsize(820, 430)
+        self.result = None
+        self.rows = []
+        self.transient(parent)
+        self.grab_set()
+
+        header = ttk.Frame(self, padding=(12, 12, 12, 6))
+        header.pack(fill="x")
+        ttk.Label(
+            header,
+            text=f"Extras for {movie_library_base(meta)}",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            header,
+            text=(
+                "Play each staged title, enter the name shown on the DVD menu or packaging, and choose "
+                "the Jellyfin extras folder. Extras do not receive their own TMDb match."
+            ),
+            wraplength=920,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
+        container = ttk.Frame(self, padding=(12, 4, 12, 4))
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        rows_frame = ttk.Frame(canvas)
+        rows_frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        window = canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        for column, (text, width) in enumerate([
+            ("DVD title", 19), ("Preview", 10), ("Extra name", 48), ("Jellyfin folder", 22)
+        ]):
+            ttk.Label(rows_frame, text=text, font=("Segoe UI", 9, "bold"), width=width).grid(
+                row=0, column=column, sticky="w", padx=(0, 8), pady=(0, 6)
+            )
+        rows_frame.columnconfigure(2, weight=1)
+
+        for row_number, staged in enumerate(batch.items, start=1):
+            disc_title = staged.disc_title
+            ttk.Label(
+                rows_frame,
+                text=f"{disc_title.title_id}  |  {disc_title.duration}  |  {disc_title.size}",
+            ).grid(row=row_number, column=0, sticky="w", padx=(0, 8), pady=4)
+            ttk.Button(
+                rows_frame,
+                text="Play",
+                command=lambda path=staged.path: self.play(path),
+                width=8,
+            ).grid(row=row_number, column=1, sticky="w", padx=(0, 8), pady=4)
+            name_var = tk.StringVar(value=f"DVD Title {disc_title.title_id}")
+            folder_var = tk.StringVar(value="featurettes")
+            ttk.Entry(rows_frame, textvariable=name_var).grid(
+                row=row_number, column=2, sticky="ew", padx=(0, 8), pady=4
+            )
+            ttk.Combobox(
+                rows_frame,
+                textvariable=folder_var,
+                values=JELLYFIN_EXTRA_FOLDERS,
+                state="readonly",
+                width=20,
+            ).grid(row=row_number, column=3, sticky="w", pady=4)
+            self.rows.append((name_var, folder_var))
+
+        bottom = ttk.Frame(self, padding=12)
+        bottom.pack(fill="x")
+        ttk.Label(
+            bottom,
+            text=f"Cancel keeps the lossless staged MKVs at: {batch.root}",
+            foreground="#5f6368",
+            wraplength=650,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(bottom, text="Cancel and Keep Staged Files", command=self.destroy).pack(side="right")
+        ttk.Button(bottom, text="Add Extras to Library", command=self.accept).pack(side="right", padx=8)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def play(self, path: Path):
+        try:
+            os.startfile(str(path))
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not open the staged extra:\n\n{path}\n\n{exc}", parent=self)
+
+    def accept(self):
+        plans = []
+        seen = set()
+        for name_var, folder_var in self.rows:
+            name = name_var.get().strip()
+            folder = folder_var.get().strip().lower()
+            if not name:
+                messagebox.showwarning(APP_NAME, "Every DVD extra needs a descriptive name.", parent=self)
+                return
+            key = (folder, sanitize_title(name).casefold())
+            if key in seen:
+                messagebox.showwarning(
+                    APP_NAME,
+                    f"Two extras have the same name in the {folder} folder. Give each one a unique name.",
+                    parent=self,
+                )
+                return
+            seen.add(key)
+            plans.append(ExtraMetadata(name, folder))
+        self.result = plans
+        self.destroy()
+
+
 class ToolTip:
     def __init__(self, widget, text):
         self.widget = widget
@@ -986,6 +1453,7 @@ class App(tk.Tk):
         self.analyzed_recommendation = None
         self.analyzed_reason = None
         self.job_running = False
+        self.active_job_kind = None
         self.cancel_event = threading.Event()
         self.active_runner = None
         self._build()
@@ -1047,7 +1515,8 @@ class App(tk.Tk):
     def _build_rip(self):
         top = ttk.Frame(self.rip_tab); top.pack(fill="x")
         ttk.Label(top, text="Insert a DVD, then scan it. Select one or more titles to rip.").pack(side="left")
-        ttk.Button(top, text="Scan DVD", command=self.scan).pack(side="right")
+        self.scan_button = ttk.Button(top, text="Scan DVD", command=self.scan)
+        self.scan_button.pack(side="right")
         self.disc_label = ttk.Label(self.rip_tab, text="No disc scanned."); self.disc_label.pack(anchor="w", pady=8)
         self.title_tree = ttk.Treeview(self.rip_tab, columns=("id","duration","size","chapters","name"), show="headings", selectmode="extended", height=12)
         for col,title,w in [("id","ID",45),("duration","Duration",90),("size","Size",90),("chapters","Ch",50),("name","Source / Name",560)]:
@@ -1059,13 +1528,22 @@ class App(tk.Tk):
         self.mode_combo = ttk.Combobox(opts,textvariable=self.mode,values=[MODE_ENHANCED,MODE_UPSCALE,MODE_ORIGINAL],state="readonly",width=32)
         self.mode_combo.pack(side="left",padx=8)
         self.mode_combo.bind("<<ComboboxSelected>>", self._update_mode_help)
-        ttk.Button(opts,text="Rip Selected Title(s)",command=self.rip_selected).pack(side="right")
+        self.rip_selected_button = ttk.Button(opts,text="Rip Selected as Movie(s)",command=self.rip_selected)
+        self.rip_selected_button.pack(side="right")
+        self.rip_extras_button = ttk.Button(opts,text="Rip Selected as Extras",command=self.rip_selected_extras)
+        self.rip_extras_button.pack(side="right", padx=(0, 8))
         mode_help = ttk.LabelFrame(self.rip_tab, text="What this option creates", padding=(10, 7))
         mode_help.pack(fill="x", pady=(0, 7))
         self.mode_help = ttk.Label(mode_help, wraplength=880, justify="left")
         self.mode_help.pack(anchor="w", fill="x")
         self._update_mode_help()
-        ttk.Label(self.rip_tab, text="Each selected DVD title gets its own TMDb match before ripping.").pack(anchor="w")
+        ttk.Label(
+            self.rip_tab,
+            text=(
+                "Movies get a TMDb match. Extras inherit one parent movie, then you preview, name, and "
+                "place them in Jellyfin extras folders."
+            ),
+        ).pack(anchor="w")
 
     def _update_mode_help(self, _event=None):
         self.mode_help.configure(text=MODE_DESCRIPTIONS.get(self.mode.get(), ""))
@@ -1135,7 +1613,15 @@ class App(tk.Tk):
     def _browse_for(self, key, folder=False):
         var = getattr(self, "var_" + key)
         if folder:
-            value = filedialog.askdirectory(initialdir=var.get() or None)
+            titles = {
+                "movies": "Choose the media library destination",
+                "staging": "Choose the local staging folder",
+            }
+            value = choose_folder(
+                self,
+                initialdir=var.get() or None,
+                title=titles.get(key, "Choose a folder"),
+            )
         else:
             initial = str(Path(var.get()).parent) if var.get() and Path(var.get()).parent.exists() else None
             value = filedialog.askopenfilename(
@@ -1466,29 +1952,44 @@ class App(tk.Tk):
                     self.activity_percent.set(f"{value:.1f}%" if 0 < value < 100 else f"{int(value)}%")
                 elif kind=="activity":
                     self.activity_status.set(val)
+                elif kind=="scan_result":
+                    titles,hint=val
+                    self.show_scan(titles,hint)
+                    self.progress_var.set(100); self.activity_percent.set("100%"); self.activity_status.set("Complete")
+                    self._set_job_running(False)
+                elif kind=="extras_staged":
+                    batch,meta=val
+                    self.progress_var.set(100); self.activity_percent.set("100%"); self.activity_status.set("Ready for review")
+                    self._set_job_running(False)
+                    self.after(0,lambda batch=batch,meta=meta:self.review_staged_extras(batch,meta))
                 elif kind=="done":
                     self.progress_var.set(100); self.activity_percent.set("100%"); self.activity_status.set("Complete")
                     self._set_job_running(False)
                     if val: messagebox.showinfo(APP_NAME,val)
                 elif kind=="cancelled":
                     self.activity_status.set("Cancelled")
+                    if self.active_job_kind == "scan":
+                        self.disc_label.configure(text="DVD scan cancelled.")
                     self.logbox.configure(state="normal")
-                    self.logbox.insert("end", "CANCELLED: The active job and its partial staging output were removed.\n")
+                    self.logbox.insert("end", "CANCELLED: The active operation stopped. Any partial staging output was removed.\n")
                     self.logbox.see("end")
                     self.logbox.configure(state="disabled")
                     self._set_job_running(False)
                     messagebox.showinfo(APP_NAME, val or "The active job was cancelled.")
                 elif kind=="error":
+                    if self.active_job_kind == "scan":
+                        self.disc_label.configure(text="DVD scan failed. Check the error and try again.")
                     self.activity_status.set("Failed"); self._set_job_running(False); messagebox.showerror(APP_NAME,val)
         except queue.Empty: pass
         self.after(100,self._drain)
 
-    def threaded(self,fn):
+    def threaded(self,fn,job_kind="processing"):
         if self.job_running:
             messagebox.showwarning(APP_NAME, "RipFoundry is already processing a job. Wait for it to finish before starting another.")
             return
         self.cancel_event.clear()
         self.active_runner = None
+        self.active_job_kind = job_kind
         self._set_job_running(True)
         self.set_activity("Starting...")
         self.set_progress(0)
@@ -1504,9 +2005,14 @@ class App(tk.Tk):
     def cancel_active_job(self):
         if not self.job_running or self.cancel_event.is_set():
             return
+        detail = (
+            "MakeMKV will stop scanning the DVD. No media files will be changed."
+            if self.active_job_kind == "scan"
+            else "The active operation will stop. Any partial staging output will be removed, and the original source will remain unchanged."
+        )
         if not messagebox.askyesno(
             APP_NAME,
-            "Cancel the active job?\n\nThe encoder will stop, partial staging output will be removed, and the original video will remain unchanged.",
+            f"Cancel the active job?\n\n{detail}",
         ):
             return
         self.cancel_event.set()
@@ -1518,15 +2024,16 @@ class App(tk.Tk):
 
     def scan(self):
         self.save_settings_silent()
+        if self.job_running:
+            messagebox.showwarning(APP_NAME, "RipFoundry is already processing a job. Wait for it to finish before starting another.")
+            return
+        self.disc_label.configure(text="Scanning DVD... This can take about a minute.")
         def work():
-            titles,hint=self.runner().scan_disc(); self.disc_titles=titles; self.disc_hint=hint
+            runner=self.runner()
+            runner.begin_phase("Scanning DVD...")
+            titles,hint=runner.scan_disc()
             self.q.put(("scan_result",(titles,hint)))
-        # special thread to push ui callback safely
-        def w():
-            try:
-                titles,hint=self.runner().scan_disc(); self.after(0,lambda:self.show_scan(titles,hint))
-            except Exception as e: self.error(e)
-        threading.Thread(target=w,daemon=True).start()
+        self.threaded(work,job_kind="scan")
 
     def show_scan(self,titles,hint):
         self.disc_titles=titles; self.disc_hint=hint
@@ -1542,6 +2049,55 @@ class App(tk.Tk):
 
     def metadata_dialog(self,suggested):
         dlg=MetadataDialog(self,self.runner(),suggested); self.wait_window(dlg); return dlg.result
+
+    def rip_selected_extras(self):
+        self.save_settings_silent()
+        ids=[int(x) for x in self.title_tree.selection()]
+        if not ids:
+            messagebox.showwarning(APP_NAME,"Select at least one DVD extra."); return
+        chosen=[next(t for t in self.disc_titles if t.title_id==i) for i in ids]
+        parent_meta=self.metadata_dialog(self.disc_hint)
+        if not parent_meta:
+            return
+        details="\n".join(f"DVD title {title.title_id}: {title.duration}, {title.size}" for title in chosen)
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"Rip these titles as lossless extras for {movie_library_base(parent_meta)}?\n\n{details}\n\n"
+            "They will be staged locally so you can play, name, and categorize them before anything is added to the library.",
+        ):
+            return
+        def work():
+            runner=self.runner()
+            batch=runner.stage_extra_titles(chosen,parent_meta)
+            self.q.put(("extras_staged",(batch,parent_meta)))
+        self.threaded(work,job_kind="extras-stage")
+
+    def review_staged_extras(self,batch,meta):
+        dialog=ExtrasReviewDialog(self,batch,meta)
+        self.wait_window(dialog)
+        if not dialog.result:
+            self.log(f"Staged DVD extras kept for later review: {batch.root}")
+            messagebox.showinfo(
+                APP_NAME,
+                f"No library files were changed. The lossless staged extras were kept here:\n\n{batch.root}",
+            )
+            return
+        plans=dialog.result
+        preview="\n".join(
+            f"DVD title {staged.disc_title.title_id} -> {plan.folder}\\{sanitize_title(plan.name)}.mkv"
+            for staged,plan in zip(batch.items,plans)
+        )
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"Add these extras to {movie_library_base(meta)}?\n\n{preview}\n\n"
+            "Each file will be copied and SHA-256 verified before the staged source is removed.",
+        ):
+            self.log(f"Staged DVD extras kept for later review: {batch.root}")
+            return
+        def work():
+            completed=self.runner().publish_extras(batch,meta,plans)
+            self.done(f"Added and verified {len(completed)} DVD extra(s) for {meta.title}.")
+        self.threaded(work,job_kind="extras-publish")
 
     def rip_selected(self):
         self.save_settings_silent()
@@ -1643,6 +2199,14 @@ class App(tk.Tk):
 
     def _set_job_running(self, running):
         self.job_running = bool(running)
+        if hasattr(self, "scan_button"):
+            self.scan_button.configure(state="disabled" if running else "normal")
+        if hasattr(self, "rip_selected_button"):
+            self.rip_selected_button.configure(state="disabled" if running else "normal")
+        if hasattr(self, "rip_extras_button"):
+            self.rip_extras_button.configure(state="disabled" if running else "normal")
+        if hasattr(self, "mode_combo"):
+            self.mode_combo.configure(state="disabled" if running else "readonly")
         if hasattr(self, "analyze_existing_button"):
             self.analyze_existing_button.configure(state="disabled" if running else "normal")
         if hasattr(self, "existing_mode_combo"):
@@ -1653,6 +2217,7 @@ class App(tk.Tk):
             self.cancel_job_button.configure(state="normal" if running else "disabled")
         if not running:
             self.active_runner = None
+            self.active_job_kind = None
             self.cancel_event.clear()
 
     def analyze_selected_video(self):
