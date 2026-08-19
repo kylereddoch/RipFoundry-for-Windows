@@ -8,7 +8,7 @@
 
 RipFoundry for Windows is the Windows-native GUI companion to [RipFoundry for Linux](https://github.com/kylereddoch/RipFoundry-for-Linux), the original project this version grew from. It rips DVDs and creates Jellyfin-ready movie versions while keeping the ripping, encoding, validation, and staging work on the Windows PC. Only completed and verified files are finalized in the configured media library.
 
-Version 1.3.0 adds guided DVD-extras handling, consistent MakeMKV title selection, cancellable DVD scanning, a modern Windows folder picker, clearer tool failures, and optional project-support links.
+Version 1.3.1 fixes Jellyfin extra names by writing each reviewed name into the MKV's embedded title while preserving the original streams.
 
 ## Download and run
 
@@ -30,7 +30,7 @@ Windows may show a first-run reputation warning for an unsigned community applic
 
 - 64-bit Windows 10 or Windows 11
 - [MakeMKV](https://www.makemkv.com/download/) for scanning and ripping DVDs
-- [FFmpeg and FFprobe](https://ffmpeg.org/download.html#build-windows) for 1080p creation, media inspection, and validation
+- [FFmpeg and FFprobe](https://ffmpeg.org/download.html#build-windows) for 1080p creation, extras title metadata, media inspection, and validation
 - [HandBrakeCLI](https://handbrake.fr/downloads2.php) when creating an Enhanced output
 - Enough local free space for staging the source and selected outputs
 
@@ -128,7 +128,7 @@ DVD title records normally contain runtimes, sizes, and chapter counts but not t
 5. Click **Play** beside each staged title, enter its descriptive name, and choose a Jellyfin folder such as `featurettes`, `behind the scenes`, `deleted scenes`, `interviews`, or `trailers`.
 6. Review the exact destination paths and click **Add Extras to Library**.
 
-Each extra is copied with a temporary `.partial` filename and SHA-256 verified before its staged source is removed. Cancelling the review keeps the staged MKVs and makes no library changes.
+Each extra is stream-copied without re-encoding, and the reviewed name is written into the MKV's embedded title so Jellyfin displays it consistently. RipFoundry validates the duration, video details, audio and subtitle track counts, and embedded title before finalizing the temporary `.partial` file and removing its staged source. Cancelling the review keeps the staged MKVs and makes no library changes.
 
 ```text
 Movie Name (Year) [tmdbid-123]\
@@ -218,7 +218,7 @@ Run the built executable from inside `dist\RipFoundry`; keep its `_internal` fol
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 
-A traditional signed Windows installer remains a possible future improvement. The current 1.3.0 release is portable: extract the complete folder and run `RipFoundry.exe`.
+A traditional signed Windows installer remains a possible future improvement. The current 1.3.1 release is portable: extract the complete folder and run `RipFoundry.exe`.
 
 ## Support RipFoundry
 

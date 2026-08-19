@@ -2,6 +2,16 @@
 
 All notable changes to RipFoundry for Windows are documented here.
 
+## 1.3.1 - 2026-08-19
+
+### Changed
+
+- DVD extras are now stream-copied without re-encoding and validated by media properties instead of only by file checksum.
+
+### Fixed
+
+- Reviewed extra names are now written into each MKV's embedded title so Jellyfin does not replace every extra name with the DVD's shared disc title.
+
 ## 1.3.0 - 2026-08-19
 
 ### Added
@@ -23,7 +33,6 @@ All notable changes to RipFoundry for Windows are documented here.
 - MakeMKV now receives the configured minimum-title-length filter during both scanning and ripping so title numbers remain consistent.
 - Cancelling a captured MakeMKV scan now stops the active process cleanly.
 - A cancelled or failed multi-extra publish no longer leaves a partially completed batch in the media library.
-
 ## 1.2.0 - 2026-08-13
 
 ### Added

@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_NAME = "RipFoundry for Windows"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 REPOSITORY_URL = "https://github.com/kylereddoch/RipFoundry-for-Windows"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "RipFoundry"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -283,6 +283,9 @@ class MediaInfo:
     subtitle_tracks: int
     field_order: str = "unknown"
     container: str = "unknown"
+    title: str = ""
+    stream_count: int = 0
+    chapter_count: int = 0
 
 
 def parse_duration(value: str) -> int:
@@ -869,19 +872,26 @@ class Runner:
 
     def ffprobe(self, path: Path):
         self.require("ffprobe")
-        p = self.run([self.s.ffprobe, "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)], capture=True)
+        p = self.run([
+            self.s.ffprobe, "-v", "error", "-print_format", "json",
+            "-show_streams", "-show_format", "-show_chapters", str(path),
+        ], capture=True)
         data = json.loads(p.stdout)
         streams = data.get("streams") or []
         video = next((x for x in streams if x.get("codec_type") == "video"), None)
         if not video: raise RuntimeError(f"No video stream found in {path}")
         duration = float((data.get("format") or {}).get("duration", "0") or 0)
         container = str((data.get("format") or {}).get("format_name") or "unknown")
+        format_info = data.get("format") or {}
+        format_tags = format_info.get("tags") or {}
         return MediaInfo(str(video.get("codec_name") or ""), duration,
                          int(video.get("width") or 0), int(video.get("height") or 0),
                          str(video.get("display_aspect_ratio") or ""),
                          sum(1 for x in streams if x.get("codec_type") == "audio"),
                          sum(1 for x in streams if x.get("codec_type") == "subtitle"),
-                         str(video.get("field_order") or "unknown"), container)
+                         str(video.get("field_order") or "unknown"), container,
+                         str(format_tags.get("title") or ""), len(streams),
+                         len(data.get("chapters") or []))
 
     def enhanced(self, source: Path, output: Path, duration=None):
         self.require("handbrake")
@@ -1028,12 +1038,69 @@ class Runner:
         self.log(f"DVD extras are ready for review: {review_root}")
         return StagedExtrasBatch(review_root, staged)
 
+    def copy_extra_with_title(self, source: Path, destination: Path, title: str, progress=None) -> None:
+        """Losslessly remux an extra while replacing its embedded display title."""
+        self.require("ffmpeg", "ffprobe")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_name(destination.name + ".partial")
+        partial.unlink(missing_ok=True)
+        source_info = self.ffprobe(source)
+        self.check_cancelled()
+        self.phase(f"Writing extra title metadata: {destination.name}")
+        if progress:
+            progress(0)
+        args = [
+            self.s.ffmpeg,
+            "-hide_banner", "-nostdin", "-y", "-i", str(source),
+            "-map", "0", "-map_metadata", "0", "-map_chapters", "0",
+            "-c", "copy", "-metadata", f"title={title}",
+            "-max_muxing_queue_size", "4096",
+            "-progress", "pipe:1", "-nostats", "-f", "matroska", str(partial),
+        ]
+        parser = lambda line: parse_ffmpeg_progress(line, source_info.duration)
+        try:
+            self.run(
+                args,
+                progress_parser=parser,
+                progress_line_filter=is_ffmpeg_progress_line,
+            )
+            if not partial.exists():
+                raise RuntimeError("FFmpeg did not create the titled extra.")
+            self.check_cancelled()
+            self.phase(f"Validating extra: {destination.name}")
+            output_info = self.ffprobe(partial)
+            if output_info.codec != source_info.codec:
+                raise RuntimeError("Extra video codec changed during the lossless remux.")
+            if (output_info.width, output_info.height) != (source_info.width, source_info.height):
+                raise RuntimeError("Extra video dimensions changed during the lossless remux.")
+            if abs(output_info.duration - source_info.duration) > 1:
+                raise RuntimeError("Extra duration changed by more than one second during the lossless remux.")
+            if output_info.audio_tracks != source_info.audio_tracks:
+                raise RuntimeError("Extra audio-track count changed during the lossless remux.")
+            if output_info.subtitle_tracks != source_info.subtitle_tracks:
+                raise RuntimeError("Extra subtitle-track count changed during the lossless remux.")
+            if output_info.stream_count != source_info.stream_count:
+                raise RuntimeError("Extra stream count changed during the lossless remux.")
+            if output_info.chapter_count != source_info.chapter_count:
+                raise RuntimeError("Extra chapter count changed during the lossless remux.")
+            if output_info.title != title:
+                raise RuntimeError("Extra embedded title did not match the reviewed name.")
+            self.check_cancelled()
+            os.replace(partial, destination)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+        if progress:
+            progress(100)
+        self.log(f"Lossless extra finalized with embedded title: {title}")
+
     def publish_extras(
         self,
         batch: StagedExtrasBatch,
         meta: MovieMetadata,
         plans: list[ExtraMetadata],
     ) -> list[Path]:
+        self.require("ffmpeg", "ffprobe")
         if len(batch.items) != len(plans):
             raise RuntimeError("The number of extra names does not match the staged DVD titles.")
         if not self.s.movies.strip():
@@ -1058,27 +1125,25 @@ class Runner:
             if not staged.path.is_file():
                 raise RuntimeError(f"Staged DVD extra is missing: {staged.path}")
             unique_destinations.add(destination_key)
-            prepared.append((staged, destination))
+            prepared.append((staged, destination, plan.name.strip()))
 
         completed = []
         total = len(prepared)
         try:
-            for index, (staged, destination) in enumerate(prepared, start=1):
+            for index, (staged, destination, embedded_title) in enumerate(prepared, start=1):
                 self.begin_phase(f"Adding extra {index} of {total}: {destination.name}")
-                copy_verified(
+                self.copy_extra_with_title(
                     staged.path,
                     destination,
-                    self.log,
+                    embedded_title,
                     lambda value, index=index: self.progress(((index - 1) + value / 100) / total * 100),
-                    self.phase,
-                    self.check_cancelled,
                 )
                 completed.append(destination)
         except Exception:
             # The destinations were preflighted as new files, so removing any
             # files finalized by this batch restores the library to its original
             # state while leaving every staged source available for another try.
-            for _staged, destination in prepared:
+            for _staged, destination, _embedded_title in prepared:
                 destination.with_name(destination.name + ".partial").unlink(missing_ok=True)
             for destination in completed:
                 destination.unlink(missing_ok=True)
@@ -1088,7 +1153,7 @@ class Runner:
                     pass
             raise
 
-        for staged, _destination in prepared:
+        for staged, _destination, _embedded_title in prepared:
             staged.path.unlink(missing_ok=True)
         try:
             batch.root.rmdir()

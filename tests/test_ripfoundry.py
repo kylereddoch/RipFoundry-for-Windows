@@ -38,8 +38,8 @@ from ripfoundry import (
 )
 
 
-def media(codec="h264", height=480, field_order="progressive"):
-    return MediaInfo(codec, 120.0, 720, height, "4:3", 1, 0, field_order, "mov,mp4")
+def media(codec="h264", height=480, field_order="progressive", title=""):
+    return MediaInfo(codec, 120.0, 720, height, "4:3", 1, 0, field_order, "mov,mp4", title)
 
 
 class RecommendationTests(unittest.TestCase):
@@ -382,6 +382,14 @@ class RunnerTests(unittest.TestCase):
             ])
             meta = MovieMetadata("High Noon", "1952", 288)
             runner = Runner(settings, lambda _message: None, lambda _value: None)
+            embedded_titles = []
+
+            def fake_titled_copy(source, destination, title, _progress=None):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes() + f"|title={title}".encode())
+                embedded_titles.append(title)
+
+            runner.copy_extra_with_title = fake_titled_copy
 
             completed = runner.publish_extras(batch, meta, [
                 ExtraMetadata("The Making of High Noon", "featurettes"),
@@ -393,9 +401,42 @@ class RunnerTests(unittest.TestCase):
                 movie_root / "featurettes" / "The Making of High Noon.mkv",
                 movie_root / "interviews" / "Tex Ritter Radio Interview.mkv",
             ])
-            self.assertEqual(completed[0].read_bytes(), b"making of")
-            self.assertEqual(completed[1].read_bytes(), b"interview")
+            self.assertEqual(completed[0].read_bytes(), b"making of|title=The Making of High Noon")
+            self.assertEqual(completed[1].read_bytes(), b"interview|title=Tex Ritter Radio Interview")
+            self.assertEqual(embedded_titles, ["The Making of High Noon", "Tex Ritter Radio Interview"])
             self.assertFalse(review.exists())
+
+    def test_copy_extra_with_title_uses_lossless_stream_copy_and_validates_title(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.mkv"
+            destination = root / "library" / "Making Of.mkv"
+            source.write_bytes(b"source")
+            runner = Runner(self.settings(root / "stage"), lambda _message: None, lambda _value: None)
+            commands = []
+
+            def fake_run(args, **_kwargs):
+                commands.append(args)
+                Path(args[-1]).write_bytes(b"remuxed")
+                return 0
+
+            runner.run = fake_run
+            runner.ffprobe = lambda path: media(
+                "mpeg2video",
+                480,
+                "tt",
+                "Making Of" if path != source else "DIRTY HARRY",
+            )
+
+            runner.copy_extra_with_title(source, destination, "Making Of")
+
+            self.assertTrue(source.exists())
+            self.assertEqual(destination.read_bytes(), b"remuxed")
+            self.assertFalse(destination.with_name(destination.name + ".partial").exists())
+            self.assertIn("-map", commands[0])
+            self.assertIn("0", commands[0])
+            self.assertIn("copy", commands[0])
+            self.assertIn("title=Making Of", commands[0])
 
     def test_publish_extras_rejects_duplicate_destination_before_copying(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -443,7 +484,7 @@ class RunnerTests(unittest.TestCase):
             runner = Runner(settings, lambda _message: None, lambda _value: None)
             copy_count = 0
 
-            def fail_second_copy(source, destination, *_args):
+            def fail_second_copy(source, destination, _title, _progress=None):
                 nonlocal copy_count
                 copy_count += 1
                 if copy_count == 2:
@@ -453,13 +494,13 @@ class RunnerTests(unittest.TestCase):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(source.read_bytes())
 
-            with mock.patch("ripfoundry.copy_verified", side_effect=fail_second_copy):
-                with self.assertRaisesRegex(RuntimeError, "second copy failed"):
-                    runner.publish_extras(
-                        batch,
-                        MovieMetadata("High Noon", "1952", 288),
-                        [ExtraMetadata("First", "featurettes"), ExtraMetadata("Second", "interviews")],
-                    )
+            runner.copy_extra_with_title = fail_second_copy
+            with self.assertRaisesRegex(RuntimeError, "second copy failed"):
+                runner.publish_extras(
+                    batch,
+                    MovieMetadata("High Noon", "1952", 288),
+                    [ExtraMetadata("First", "featurettes"), ExtraMetadata("Second", "interviews")],
+                )
 
             movie_root = movies / movie_library_base(MovieMetadata("High Noon", "1952", 288))
             self.assertFalse(movie_root.joinpath("featurettes", "First.mkv").exists())
