@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a focused improvement to RipFoundry for Windows.
+title: "[Feature]: "
+labels: [feature request]
+body:
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow area
+      options:
+        - App interface or accessibility
+        - Settings or tool detection
+        - DVD scanning or title selection
+        - Main-feature ripping
+        - DVD extras or featurettes
+        - Existing-video processing
+        - Encoding or output selection
+        - Validation or media-library transfer
+        - Documentation or setup
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What RipFoundry workflow is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the interaction, processing behavior, and expected output.
+    validations:
+      required: true
+  - type: dropdown
+    id: safety-impact
+    attributes:
+      label: Safety and file impact
+      options:
+        - No effect on source, staging, or media-library files
+        - Changes ripping, encoding, or validation behavior
+        - Changes staging or media-library naming and transfer behavior
+        - Could replace, remove, or otherwise modify an existing file
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I described any effect on original sources, staging files, completed outputs, and existing media-library files.
+          required: true
+        - label: I searched existing issues and discussions for a similar request.
+          required: true

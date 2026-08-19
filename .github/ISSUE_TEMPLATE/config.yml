@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kylereddoch/RipFoundry-for-Windows/security/advisories/new
+    about: Report credential exposure, unsafe file handling, path-boundary, command-execution, or release-integrity vulnerabilities privately.
+  - name: Setup and usage questions
+    url: https://github.com/kylereddoch/RipFoundry-for-Windows/discussions/categories/q-a
+    about: Ask for help with MakeMKV, FFmpeg, HandBrakeCLI, TMDb, DVD drives, processing choices, or Jellyfin paths.

@@ -1,0 +1,103 @@
+name: Bug report
+description: Report reproducible incorrect behavior in RipFoundry for Windows.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include TMDb API keys, copyrighted media, private server names, IP addresses, or unredacted personal paths.
+  - type: input
+    id: version
+    attributes:
+      label: RipFoundry version
+      description: Find this in the About tab or release filename.
+      placeholder: 1.3.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: How are you running RipFoundry?
+      options:
+        - Portable release
+        - Running from source with Launch-RipFoundry.bat
+        - Locally built executable
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Affected workflow
+      options:
+        - App startup or interface
+        - Settings or tool detection
+        - DVD scan
+        - Main-feature DVD rip
+        - DVD extras or featurettes
+        - Process an existing video
+        - Encoding or output selection
+        - Validation or media-library transfer
+        - Cancellation or cleanup
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: tool-versions
+    attributes:
+      label: Relevant tool versions and status
+      description: List the versions or Settings-tab status for MakeMKV, FFmpeg/FFprobe, and HandBrakeCLI when involved. Do not include private paths.
+      placeholder: |
+        MakeMKV: 1.x.x, Ready
+        FFmpeg/FFprobe: 8.x, Ready
+        HandBrakeCLI: 1.x.x, Ready
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: source-details
+    attributes:
+      label: Sanitized source details
+      description: Describe the disc, title selection, or existing video's container, codec, resolution, audio, and subtitles when relevant. Use fictional names if necessary.
+      render: text
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact controls and choices used before the problem appeared.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and exact error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized activity-log excerpt
+      description: Remove API keys, usernames, hostnames, share names, IP addresses, personal paths, and media filenames.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed credentials, copyrighted media, and private infrastructure details.
+          required: true
+        - label: I searched existing issues and discussions for this behavior.
+          required: true
